@@ -1,0 +1,11 @@
+node_modules/
+npm-debug.log*
+.DS_Store
+*.log
+
+# Runtime data (uploaded photos + database). Seed file is tracked.
+public/uploads/*
+!public/uploads/.gitkeep
+data/listings.runtime.json
+.env
+.env.local
