@@ -1,22 +1,23 @@
 // Категорії, міста та дрібні утиліти, спільні для всього застосунку.
+import { t, catName, getLang } from './i18n.js';
 
 export const CATEGORIES = [
-  { slug: 'jobs',        name: 'Робота',            emoji: '💼' },
-  { slug: 'housing',     name: 'Житло / Оренда',    emoji: '🏠' },
-  { slug: 'services',    name: 'Послуги',           emoji: '🛠️' },
-  { slug: 'transport',   name: 'Транспорт / Підвіз', emoji: '🚗' },
-  { slug: 'goods',       name: 'Речі',              emoji: '📦' },
-  { slug: 'furniture',   name: 'Меблі та побут',    emoji: '🛋️' },
-  { slug: 'electronics', name: 'Електроніка',       emoji: '📱' },
-  { slug: 'kids',        name: 'Дитячі товари',     emoji: '🧸' },
-  { slug: 'beauty',      name: "Краса і здоров'я",  emoji: '💅' },
-  { slug: 'documents',   name: 'Документи / Переклади', emoji: '📄' },
-  { slug: 'education',   name: 'Навчання',          emoji: '📚' },
-  { slug: 'pets',        name: 'Тварини',           emoji: '🐾' },
-  { slug: 'food',        name: 'Їжа / Кулінарія',   emoji: '🍲' },
-  { slug: 'free',        name: 'Безкоштовно',       emoji: '🎁' },
-  { slug: 'community',   name: 'Спільнота',         emoji: '🤝' },
-  { slug: 'other',       name: 'Інше',              emoji: '✨' },
+  { slug: 'jobs',        emoji: '💼' },
+  { slug: 'housing',     emoji: '🏠' },
+  { slug: 'services',    emoji: '🛠️' },
+  { slug: 'transport',   emoji: '🚗' },
+  { slug: 'goods',       emoji: '📦' },
+  { slug: 'furniture',   emoji: '🛋️' },
+  { slug: 'electronics', emoji: '📱' },
+  { slug: 'kids',        emoji: '🧸' },
+  { slug: 'beauty',      emoji: '💅' },
+  { slug: 'documents',   emoji: '📄' },
+  { slug: 'education',   emoji: '📚' },
+  { slug: 'pets',        emoji: '🐾' },
+  { slug: 'food',        emoji: '🍲' },
+  { slug: 'free',        emoji: '🎁' },
+  { slug: 'community',   emoji: '🤝' },
+  { slug: 'other',       emoji: '✨' },
 ];
 
 export const CAT_MAP = Object.fromEntries(CATEGORIES.map((c) => [c.slug, c]));
@@ -28,21 +29,27 @@ export const CITIES = [
   'Southampton', 'Northampton', 'Aberdeen', 'Belfast', 'Luton', 'Milton Keynes',
 ];
 
-export const SORTS = [
-  { value: 'new',       label: 'Спочатку нові' },
-  { value: 'cheap',     label: 'Дешевші спершу' },
-  { value: 'expensive', label: 'Дорожчі спершу' },
-  { value: 'popular',   label: 'Популярні' },
-];
+export function sorts() {
+  return [
+    { value: 'new', label: t('sort.new') },
+    { value: 'cheap', label: t('sort.cheap') },
+    { value: 'expensive', label: t('sort.expensive') },
+    { value: 'popular', label: t('sort.popular') },
+  ];
+}
+
+export function emojiFor(slug) {
+  const c = CAT_MAP[slug];
+  return c ? c.emoji : '✨';
+}
 
 export function catLabel(slug) {
-  const c = CAT_MAP[slug];
-  return c ? `${c.emoji} ${c.name}` : 'Інше';
+  return `${emojiFor(slug)} ${catName(slug)}`;
 }
 
 export function formatPrice(listing) {
-  if (listing.isFree || listing.price === 0) return 'Безкоштовно';
-  if (listing.price == null) return 'Договірна';
+  if (listing.isFree || listing.price === 0) return t('common.free');
+  if (listing.price == null) return t('common.negotiable');
   const n = Number(listing.price);
   const str = Number.isInteger(n) ? n.toString() : n.toFixed(2);
   return '£' + str.replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
@@ -51,15 +58,15 @@ export function formatPrice(listing) {
 export function timeAgo(iso) {
   const d = new Date(iso);
   const s = Math.floor((Date.now() - d.getTime()) / 1000);
-  if (s < 60) return 'щойно';
+  if (s < 60) return t('time.now');
   const m = Math.floor(s / 60);
-  if (m < 60) return `${m} хв тому`;
+  if (m < 60) return t('time.min', { n: m });
   const h = Math.floor(m / 60);
-  if (h < 24) return `${h} год тому`;
+  if (h < 24) return t('time.hour', { n: h });
   const days = Math.floor(h / 24);
-  if (days === 1) return 'вчора';
-  if (days < 7) return `${days} дн. тому`;
-  return d.toLocaleDateString('uk-UA', { day: 'numeric', month: 'long' });
+  if (days === 1) return t('time.yesterday');
+  if (days < 7) return t('time.days', { n: days });
+  return d.toLocaleDateString(getLang() === 'en' ? 'en-GB' : 'uk-UA', { day: 'numeric', month: 'long' });
 }
 
 // Безпечне екранування тексту перед вставкою в HTML.

@@ -1,0 +1,158 @@
+// Двомовність: українська (типово) та англійська.
+// Використання: t('key') повертає рядок поточної мови; t('key', {n: 5}) — з підстановкою.
+
+const DICT = {
+  uk: {
+    'app.tagline': 'Оголошення для українців у Британії',
+    'app.subtitle': 'Робота, житло, послуги, речі та підвезення — швидко і безкоштовно.',
+    'nav.home': 'Головна', 'nav.search': 'Пошук', 'nav.add': 'Додати',
+    'nav.saved': 'Збережені', 'nav.mine': 'Мої', 'nav.chats': 'Чати', 'nav.profile': 'Профіль',
+    'search.placeholder': 'Пошук оголошень…', 'search.btn': 'Знайти',
+    'common.all': 'Усі', 'common.categories': 'Категорії', 'common.allListings': 'Усі оголошення',
+    'common.fresh': 'Свіжі оголошення', 'common.total': 'всього {n}', 'common.found': '{n} знайдено',
+    'common.back': 'Назад', 'common.cancel': 'Скасувати', 'common.save': 'Зберегти',
+    'common.delete': 'Видалити', 'common.edit': 'Редагувати', 'common.send': 'Надіслати',
+    'common.loading': 'Завантаження…', 'common.reset': 'Скинути', 'common.free': 'Безкоштовно',
+    'common.negotiable': 'Договірна', 'common.viewAll': 'Дивитися всі оголошення →',
+    'price.from': 'Ціна від £', 'price.to': 'до £', 'filter.free': 'Безкоштовні', 'filter.photo': 'З фото',
+    'filter.anyCity': 'Будь-яке місто',
+    'sort.new': 'Спочатку нові', 'sort.cheap': 'Дешевші спершу', 'sort.expensive': 'Дорожчі спершу', 'sort.popular': 'Популярні',
+    'empty.title': 'Нічого не знайдено', 'empty.sub': 'Спробуйте змінити фільтри або пошуковий запит.',
+    'card.photo': 'фото',
+    'detail.contacts': 'Контакти', 'detail.call': 'Подзвонити', 'detail.description': 'Опис',
+    'detail.message': 'Написати в чаті', 'detail.share': 'Поділитися', 'detail.report': 'Поскаржитися',
+    'detail.warn': '⚠️ Не переказуйте передоплату незнайомим людям.',
+    'detail.noContacts': 'Контактів не вказано.', 'detail.noPhotos': 'Світлини не додано',
+    'detail.manage': 'Керування', 'detail.markSold': 'Позначити проданим', 'detail.markActive': 'Знову активне',
+    'detail.bump': 'Підняти', 'detail.sold': 'Продано', 'detail.views': 'переглядів',
+    'detail.seller': 'Продавець', 'detail.otherAds': 'Інші оголошення',
+    'save.add': '☆ Зберегти', 'save.added': '★ Збережено',
+    'form.newTitle': 'Нове оголошення', 'form.editTitle': 'Редагувати оголошення',
+    'form.intro': 'Заповніть коротко й по суті — так швидше відгукнуться.',
+    'form.name': 'Назва', 'form.category': 'Категорія', 'form.chooseCategory': 'Оберіть категорію…',
+    'form.location': 'Місто або індекс', 'form.locationHint': 'Можна повний чи частковий пост-код, або лише місто.',
+    'form.price': 'Ціна, £', 'form.freeToggle': 'Безкоштовно / договірна',
+    'form.phone': 'Телефон', 'form.waSame': 'Цей номер у WhatsApp', 'form.waOther': 'WhatsApp (інший номер)',
+    'form.telegram': 'Telegram (за бажанням)', 'form.description': 'Опис',
+    'form.descPlaceholder': 'Коротко опишіть: що, в якому стані, умови, коли можна забрати/зустрітися…',
+    'form.photos': 'Фото (до 8)', 'form.dzTitle': 'Натисніть або перетягніть фото',
+    'form.dzSub': 'Показуються тільки на сторінці оголошення. JPG/PNG/WebP.',
+    'form.cover': 'Головне', 'form.publish': 'Опублікувати оголошення', 'form.saveChanges': 'Зберегти зміни',
+    'form.saving': 'Зберігаємо…', 'form.maxPhotos': 'Максимум 8 фото',
+    'auth.login': 'Увійти', 'auth.register': 'Реєстрація', 'auth.logout': 'Вийти',
+    'auth.email': 'Email', 'auth.password': 'Пароль', 'auth.name': "Ім'я", 'auth.city': 'Місто',
+    'auth.noAccount': 'Немає акаунта? Зареєструватися', 'auth.haveAccount': 'Вже є акаунт? Увійти',
+    'auth.welcome': 'Вітаємо! Ви увійшли.', 'auth.registered': 'Акаунт створено!',
+    'auth.needLogin': 'Увійдіть, щоб користуватися цією функцією.',
+    'profile.title': 'Профіль', 'profile.myListings': 'Мої оголошення', 'profile.settings': 'Налаштування',
+    'profile.memberSince': 'З нами з', 'profile.activeAds': 'активних',
+    'chats.title': 'Повідомлення', 'chats.empty': 'Поки немає діалогів', 'chats.emptySub': 'Напишіть продавцю зі сторінки оголошення.',
+    'chats.you': 'Ви: ', 'chats.placeholder': 'Напишіть повідомлення…', 'chats.about': 'Щодо:',
+    'report.title': 'Поскаржитися на оголошення', 'report.reason': 'Причина',
+    'report.spam': 'Спам / шахрайство', 'report.prohibited': 'Заборонений товар', 'report.wrong': 'Неправильна категорія', 'report.other': 'Інше',
+    'report.details': 'Деталі (за бажанням)', 'report.submit': 'Надіслати скаргу', 'report.thanks': 'Дякуємо! Скаргу надіслано.',
+    'saved.title': '★ Збережені оголошення', 'saved.empty': 'Немає збережених', 'saved.emptySub': 'Натискайте ☆ на оголошеннях, щоб зберегти їх тут.',
+    'time.now': 'щойно', 'time.min': '{n} хв тому', 'time.hour': '{n} год тому',
+    'time.yesterday': 'вчора', 'time.days': '{n} дн. тому',
+    'footer.about': 'безкоштовна дошка оголошень для української спільноти у Великій Британії.',
+    'footer.safety': 'Будьте обережні: не переказуйте гроші наперед незнайомцям і перевіряйте інформацію особисто.',
+  },
+  en: {
+    'app.tagline': 'Classifieds for Ukrainians in the UK',
+    'app.subtitle': 'Jobs, housing, services, items and rideshare — fast and free.',
+    'nav.home': 'Home', 'nav.search': 'Search', 'nav.add': 'Post',
+    'nav.saved': 'Saved', 'nav.mine': 'Mine', 'nav.chats': 'Chats', 'nav.profile': 'Profile',
+    'search.placeholder': 'Search listings…', 'search.btn': 'Search',
+    'common.all': 'All', 'common.categories': 'Categories', 'common.allListings': 'All listings',
+    'common.fresh': 'Fresh listings', 'common.total': '{n} total', 'common.found': '{n} found',
+    'common.back': 'Back', 'common.cancel': 'Cancel', 'common.save': 'Save',
+    'common.delete': 'Delete', 'common.edit': 'Edit', 'common.send': 'Send',
+    'common.loading': 'Loading…', 'common.reset': 'Reset', 'common.free': 'Free',
+    'common.negotiable': 'Negotiable', 'common.viewAll': 'See all listings →',
+    'price.from': 'Price from £', 'price.to': 'to £', 'filter.free': 'Free', 'filter.photo': 'With photo',
+    'filter.anyCity': 'Any city',
+    'sort.new': 'Newest first', 'sort.cheap': 'Cheapest first', 'sort.expensive': 'Most expensive', 'sort.popular': 'Popular',
+    'empty.title': 'Nothing found', 'empty.sub': 'Try changing the filters or search query.',
+    'card.photo': 'photo',
+    'detail.contacts': 'Contacts', 'detail.call': 'Call', 'detail.description': 'Description',
+    'detail.message': 'Message in chat', 'detail.share': 'Share', 'detail.report': 'Report',
+    'detail.warn': '⚠️ Never send prepayment to strangers.',
+    'detail.noContacts': 'No contacts provided.', 'detail.noPhotos': 'No photos added',
+    'detail.manage': 'Manage', 'detail.markSold': 'Mark as sold', 'detail.markActive': 'Make active again',
+    'detail.bump': 'Bump up', 'detail.sold': 'Sold', 'detail.views': 'views',
+    'detail.seller': 'Seller', 'detail.otherAds': 'Other listings',
+    'save.add': '☆ Save', 'save.added': '★ Saved',
+    'form.newTitle': 'New listing', 'form.editTitle': 'Edit listing',
+    'form.intro': 'Keep it short and to the point — you’ll get replies faster.',
+    'form.name': 'Title', 'form.category': 'Category', 'form.chooseCategory': 'Choose a category…',
+    'form.location': 'City or postcode', 'form.locationHint': 'Full or partial postcode, or just the city.',
+    'form.price': 'Price, £', 'form.freeToggle': 'Free / negotiable',
+    'form.phone': 'Phone', 'form.waSame': 'This number on WhatsApp', 'form.waOther': 'WhatsApp (other number)',
+    'form.telegram': 'Telegram (optional)', 'form.description': 'Description',
+    'form.descPlaceholder': 'Briefly describe: what, condition, terms, when to collect/meet…',
+    'form.photos': 'Photos (up to 8)', 'form.dzTitle': 'Click or drag photos here',
+    'form.dzSub': 'Shown only on the listing page. JPG/PNG/WebP.',
+    'form.cover': 'Cover', 'form.publish': 'Publish listing', 'form.saveChanges': 'Save changes',
+    'form.saving': 'Saving…', 'form.maxPhotos': 'Maximum 8 photos',
+    'auth.login': 'Log in', 'auth.register': 'Sign up', 'auth.logout': 'Log out',
+    'auth.email': 'Email', 'auth.password': 'Password', 'auth.name': 'Name', 'auth.city': 'City',
+    'auth.noAccount': 'No account? Sign up', 'auth.haveAccount': 'Already have an account? Log in',
+    'auth.welcome': 'Welcome back! You are logged in.', 'auth.registered': 'Account created!',
+    'auth.needLogin': 'Log in to use this feature.',
+    'profile.title': 'Profile', 'profile.myListings': 'My listings', 'profile.settings': 'Settings',
+    'profile.memberSince': 'Member since', 'profile.activeAds': 'active',
+    'chats.title': 'Messages', 'chats.empty': 'No conversations yet', 'chats.emptySub': 'Message a seller from a listing page.',
+    'chats.you': 'You: ', 'chats.placeholder': 'Type a message…', 'chats.about': 'About:',
+    'report.title': 'Report listing', 'report.reason': 'Reason',
+    'report.spam': 'Spam / scam', 'report.prohibited': 'Prohibited item', 'report.wrong': 'Wrong category', 'report.other': 'Other',
+    'report.details': 'Details (optional)', 'report.submit': 'Submit report', 'report.thanks': 'Thank you! Report submitted.',
+    'saved.title': '★ Saved listings', 'saved.empty': 'No saved listings', 'saved.emptySub': 'Tap ☆ on listings to save them here.',
+    'time.now': 'just now', 'time.min': '{n} min ago', 'time.hour': '{n} h ago',
+    'time.yesterday': 'yesterday', 'time.days': '{n} d ago',
+    'footer.about': 'a free classifieds board for the Ukrainian community in the UK.',
+    'footer.safety': 'Stay safe: never pay in advance to strangers and verify information in person.',
+  },
+};
+
+const CAT_NAMES = {
+  jobs: { uk: 'Робота', en: 'Jobs' },
+  housing: { uk: 'Житло / Оренда', en: 'Housing / Rent' },
+  services: { uk: 'Послуги', en: 'Services' },
+  transport: { uk: 'Транспорт / Підвіз', en: 'Transport / Rideshare' },
+  goods: { uk: 'Речі', en: 'Goods' },
+  furniture: { uk: 'Меблі та побут', en: 'Furniture & home' },
+  electronics: { uk: 'Електроніка', en: 'Electronics' },
+  kids: { uk: 'Дитячі товари', en: 'Kids' },
+  beauty: { uk: "Краса і здоров'я", en: 'Beauty & health' },
+  documents: { uk: 'Документи / Переклади', en: 'Documents / Translation' },
+  education: { uk: 'Навчання', en: 'Education' },
+  pets: { uk: 'Тварини', en: 'Pets' },
+  food: { uk: 'Їжа / Кулінарія', en: 'Food / Cooking' },
+  free: { uk: 'Безкоштовно', en: 'Free' },
+  community: { uk: 'Спільнота', en: 'Community' },
+  other: { uk: 'Інше', en: 'Other' },
+};
+
+let lang = localStorage.getItem('ouk:lang')
+  || (navigator.language && navigator.language.startsWith('en') ? 'en' : 'uk');
+
+export function getLang() { return lang; }
+export function setLang(l) {
+  if (l !== 'uk' && l !== 'en') return;
+  lang = l;
+  localStorage.setItem('ouk:lang', l);
+  document.documentElement.lang = l;
+}
+
+export function t(key, vars) {
+  let s = (DICT[lang] && DICT[lang][key]) ?? (DICT.uk[key] ?? key);
+  if (vars) for (const k in vars) s = s.replace(`{${k}}`, vars[k]);
+  return s;
+}
+
+export function catName(slug) {
+  const c = CAT_NAMES[slug];
+  return c ? c[lang] : (CAT_NAMES.other[lang]);
+}
+
+document.documentElement.lang = lang;

@@ -5,8 +5,8 @@
  * Нічого не треба встановлювати: `node server.js` і готово.
  *
  *   • Віддає статику з /public
- *   • REST API для оголошень (/api/...)
- *   • Зберігає дані у data/listings.runtime.json (JSON-сховище)
+ *   • REST API: оголошення, акаунти/сесії, повідомлення (чат), скарги
+ *   • Зберігає дані у data/db.runtime.json (JSON-сховище)
  *   • Приймає фото як base64 і кладе їх у public/uploads
  */
 
@@ -26,9 +26,10 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const DATA_DIR = path.join(__dirname, 'data');
 const UPLOADS_DIR = path.join(PUBLIC_DIR, 'uploads');
 const SEED_FILE = path.join(DATA_DIR, 'listings.json');
-const DB_FILE = path.join(DATA_DIR, 'listings.runtime.json');
+const DB_FILE = path.join(DATA_DIR, 'db.runtime.json');
 
 const MAX_BODY = 20 * 1024 * 1024; // 20 МБ — вистачає на кілька стиснених фото
+const SESSION_TTL = 1000 * 60 * 60 * 24 * 30; // 30 днів
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -52,7 +53,13 @@ const MIME = {
  * Сховище даних (проста JSON-база з кешем у пам'яті)
  * ------------------------------------------------------------------------- */
 
-let DB = { listings: [] };
+let DB = {
+  listings: [],
+  users: [],
+  sessions: {},   // token -> { userId, createdAt }
+  messages: [],   // { id, listingId, threadId, fromUserId, toUserId, text, createdAt, readBy:[] }
+  reports: [],    // { id, listingId, reason, text, createdAt, resolved }
+};
 
 async function ensureDirs() {
   await fs.mkdir(DATA_DIR, { recursive: true });
@@ -63,29 +70,47 @@ async function loadDB() {
   await ensureDirs();
   try {
     const raw = await fs.readFile(DB_FILE, 'utf8');
-    DB = JSON.parse(raw);
+    Object.assign(DB, JSON.parse(raw));
   } catch {
-    // Перший запуск — беремо демо-дані з seed-файлу.
+    // Перший запуск — беремо демо-дані оголошень із seed-файлу.
     try {
-      const seed = await fs.readFile(SEED_FILE, 'utf8');
-      DB = JSON.parse(seed);
+      const seed = JSON.parse(await fs.readFile(SEED_FILE, 'utf8'));
+      DB.listings = seed.listings || [];
     } catch {
-      DB = { listings: [] };
+      DB.listings = [];
     }
     await saveDB();
   }
-  if (!Array.isArray(DB.listings)) DB.listings = [];
+  // Гарантуємо наявність усіх колекцій (міграція старих баз).
+  DB.listings ||= [];
+  DB.users ||= [];
+  DB.sessions ||= {};
+  DB.messages ||= [];
+  DB.reports ||= [];
+  // Дефолтні поля для старих оголошень.
+  for (const l of DB.listings) {
+    l.status ||= 'active';
+    l.bumpedAt ||= l.createdAt;
+    if (!('userId' in l)) l.userId = null;
+  }
+  pruneSessions();
 }
 
 let saveQueue = Promise.resolve();
 function saveDB() {
-  // Серіалізуємо записи, щоб уникнути гонок під час паралельних запитів.
   saveQueue = saveQueue.then(async () => {
     const tmp = DB_FILE + '.tmp';
-    await fs.writeFile(tmp, JSON.stringify(DB, null, 2), 'utf8');
+    await fs.writeFile(tmp, JSON.stringify(DB), 'utf8');
     await fs.rename(tmp, DB_FILE);
   }).catch((e) => console.error('Помилка збереження бази:', e));
   return saveQueue;
+}
+
+function pruneSessions() {
+  const now = Date.now();
+  for (const [token, s] of Object.entries(DB.sessions)) {
+    if (now - new Date(s.createdAt).getTime() > SESSION_TTL) delete DB.sessions[token];
+  }
 }
 
 /* ----------------------------------------------------------------------------
@@ -98,6 +123,17 @@ function sha256(s) {
   return crypto.createHash('sha256').update(String(s)).digest('hex');
 }
 
+function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+  const derived = crypto.scryptSync(String(password), salt, 32).toString('hex');
+  return { salt, hash: derived };
+}
+function verifyPassword(password, salt, hash) {
+  try {
+    const d = crypto.scryptSync(String(password), salt, 32);
+    return crypto.timingSafeEqual(d, Buffer.from(hash, 'hex'));
+  } catch { return false; }
+}
+
 function clampStr(v, max) {
   if (v == null) return '';
   return String(v).trim().slice(0, max);
@@ -105,7 +141,6 @@ function clampStr(v, max) {
 
 function sanitizePhone(v) {
   if (!v) return '';
-  // Лишаємо цифри та провідний +
   const s = String(v).trim();
   const plus = s.startsWith('+') ? '+' : '';
   return plus + s.replace(/[^\d]/g, '').slice(0, 18);
@@ -114,6 +149,10 @@ function sanitizePhone(v) {
 function sanitizeTelegram(v) {
   if (!v) return '';
   return String(v).trim().replace(/^@/, '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 40);
+}
+
+function validEmail(v) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || '').trim());
 }
 
 function send(res, status, body, headers = {}) {
@@ -154,14 +193,13 @@ function readBody(req) {
 }
 
 const ALLOWED_IMG = {
-  '/9j/': '.jpg', // jpeg
+  '/9j/': '.jpg',
   'iVBOR': '.png',
   'UklGR': '.webp',
   'R0lGO': '.gif',
 };
 
-/** Зберігає масив data-URL зображень як файли, повертає масив відносних шляхів. */
-async function saveImages(images, listingId) {
+async function saveImages(images, ownerId) {
   const out = [];
   if (!Array.isArray(images)) return out;
   for (let i = 0; i < images.length && i < 8; i++) {
@@ -169,18 +207,17 @@ async function saveImages(images, listingId) {
     if (typeof dataUrl !== 'string') continue;
     const m = /^data:(image\/[a-z+]+);base64,(.+)$/i.exec(dataUrl);
     if (!m) {
-      // Можливо, це вже збережений шлях (під час редагування) — лишаємо як є.
       if (dataUrl.startsWith('/uploads/')) out.push(dataUrl);
       continue;
     }
     const buf = Buffer.from(m[2], 'base64');
-    if (buf.length > 6 * 1024 * 1024) continue; // окреме фото не більше 6 МБ
+    if (buf.length > 6 * 1024 * 1024) continue;
     let ext = '.jpg';
     const head = buf.toString('base64').slice(0, 5);
     for (const sig in ALLOWED_IMG) {
       if (head.startsWith(sig)) { ext = ALLOWED_IMG[sig]; break; }
     }
-    const name = `${listingId}-${i}-${uid(6)}${ext}`;
+    const name = `${ownerId}-${i}-${uid(6)}${ext}`;
     await fs.writeFile(path.join(UPLOADS_DIR, name), buf);
     out.push(`/uploads/${name}`);
   }
@@ -196,13 +233,95 @@ async function removeImageFiles(paths) {
 }
 
 /* ----------------------------------------------------------------------------
- * Робота з оголошеннями
+ * Автентифікація
+ * ------------------------------------------------------------------------- */
+
+function getToken(req, url) {
+  const auth = req.headers.authorization || '';
+  if (auth.startsWith('Bearer ')) return auth.slice(7).trim();
+  return url.searchParams.get('token') || null;
+}
+
+function currentUser(req, url) {
+  const token = getToken(req, url);
+  if (!token) return null;
+  const s = DB.sessions[token];
+  if (!s) return null;
+  if (Date.now() - new Date(s.createdAt).getTime() > SESSION_TTL) {
+    delete DB.sessions[token];
+    return null;
+  }
+  return DB.users.find((u) => u.id === s.userId) || null;
+}
+
+function publicUser(u) {
+  if (!u) return null;
+  return { id: u.id, name: u.name, city: u.city || '', avatar: u.avatar || '', createdAt: u.createdAt };
+}
+function selfUser(u) {
+  if (!u) return null;
+  return { ...publicUser(u), email: u.email, phone: u.phone || '' };
+}
+
+async function registerUser(body) {
+  const name = clampStr(body.name, 40);
+  const email = clampStr(body.email, 120).toLowerCase();
+  const password = String(body.password || '');
+  if (name.length < 2) return { status: 400, body: { error: "Вкажіть ім'я (мін. 2 символи)." } };
+  if (!validEmail(email)) return { status: 400, body: { error: 'Некоректний email.' } };
+  if (password.length < 6) return { status: 400, body: { error: 'Пароль має містити мінімум 6 символів.' } };
+  if (DB.users.some((u) => u.email === email)) return { status: 409, body: { error: 'Користувач із таким email вже існує.' } };
+
+  const { salt, hash } = hashPassword(password);
+  const user = {
+    id: uid(12), name, email, salt, hash,
+    phone: sanitizePhone(body.phone), city: clampStr(body.city, 60),
+    avatar: '', createdAt: new Date().toISOString(),
+  };
+  DB.users.push(user);
+  const token = issueSession(user.id);
+  await saveDB();
+  return { status: 201, body: { token, user: selfUser(user) } };
+}
+
+async function loginUser(body) {
+  const email = clampStr(body.email, 120).toLowerCase();
+  const password = String(body.password || '');
+  const user = DB.users.find((u) => u.email === email);
+  if (!user || !verifyPassword(password, user.salt, user.hash)) {
+    return { status: 401, body: { error: 'Невірний email або пароль.' } };
+  }
+  const token = issueSession(user.id);
+  await saveDB();
+  return { status: 200, body: { token, user: selfUser(user) } };
+}
+
+function issueSession(userId) {
+  const token = crypto.randomBytes(32).toString('hex');
+  DB.sessions[token] = { userId, createdAt: new Date().toISOString() };
+  return token;
+}
+
+async function updateProfile(user, body) {
+  if (body.name != null) user.name = clampStr(body.name, 40) || user.name;
+  if (body.phone != null) user.phone = sanitizePhone(body.phone);
+  if (body.city != null) user.city = clampStr(body.city, 60);
+  if (typeof body.avatar === 'string' && body.avatar.startsWith('data:image/')) {
+    const [saved] = await saveImages([body.avatar], 'avatar-' + user.id);
+    if (saved) { await removeImageFiles([user.avatar]); user.avatar = saved; }
+  }
+  await saveDB();
+  return { status: 200, body: { user: selfUser(user) } };
+}
+
+/* ----------------------------------------------------------------------------
+ * Оголошення
  * ------------------------------------------------------------------------- */
 
 function publicListing(l) {
-  // Не віддаємо назовні токен редагування.
   const { editTokenHash, ...rest } = l;
-  return rest;
+  const owner = l.userId ? DB.users.find((u) => u.id === l.userId) : null;
+  return { ...rest, owner: owner ? publicUser(owner) : null };
 }
 
 function validateListing(b) {
@@ -238,7 +357,15 @@ function validateListing(b) {
   };
 }
 
-async function createListing(body) {
+// Чи має право користувач/токен керувати оголошенням.
+function canManage(listing, user, body, url) {
+  if (user && listing.userId && listing.userId === user.id) return true;
+  const tok = (body && body.editToken) || (url && url.searchParams.get('token'));
+  if (tok && listing.editTokenHash && sha256(tok) === listing.editTokenHash) return true;
+  return false;
+}
+
+async function createListing(body, user) {
   const { errors, value } = validateListing(body);
   if (errors.length) return { status: 400, body: { error: errors.join(' ') } };
 
@@ -248,11 +375,10 @@ async function createListing(body) {
 
   const now = new Date().toISOString();
   const listing = {
-    id,
-    ...value,
-    images,
-    createdAt: now,
-    updatedAt: now,
+    id, ...value, images,
+    userId: user ? user.id : null,
+    status: 'active',
+    createdAt: now, updatedAt: now, bumpedAt: now,
     views: 0,
     editTokenHash: sha256(token),
   };
@@ -261,16 +387,29 @@ async function createListing(body) {
   return { status: 201, body: { listing: publicListing(listing), editToken: token } };
 }
 
-async function updateListing(id, body) {
+async function updateListing(id, body, user, url) {
   const l = DB.listings.find((x) => x.id === id);
   if (!l) return { status: 404, body: { error: 'Оголошення не знайдено.' } };
-  if (!body.editToken || sha256(body.editToken) !== l.editTokenHash) {
-    return { status: 403, body: { error: 'Немає прав на редагування цього оголошення.' } };
+  if (!canManage(l, user, body, url)) return { status: 403, body: { error: 'Немає прав на редагування.' } };
+
+  // Зміна лише статусу (продано / активне) або підняття.
+  if (body.action === 'status' && typeof body.status === 'string') {
+    if (['active', 'sold', 'archived'].includes(body.status)) {
+      l.status = body.status; l.updatedAt = new Date().toISOString();
+      await saveDB();
+      return { status: 200, body: { listing: publicListing(l) } };
+    }
+    return { status: 400, body: { error: 'Невідомий статус.' } };
   }
+  if (body.action === 'bump') {
+    l.bumpedAt = new Date().toISOString();
+    await saveDB();
+    return { status: 200, body: { listing: publicListing(l) } };
+  }
+
   const { errors, value } = validateListing(body);
   if (errors.length) return { status: 400, body: { error: errors.join(' ') } };
 
-  // Перерахунок зображень: лишаємо старі шляхи, додаємо нові data-URL.
   const keep = (body.images || []).filter((s) => typeof s === 'string' && s.startsWith('/uploads/'));
   const removed = (l.images || []).filter((p) => !keep.includes(p));
   const fresh = await saveImages(body.images, id);
@@ -281,20 +420,18 @@ async function updateListing(id, body) {
   return { status: 200, body: { listing: publicListing(l) } };
 }
 
-async function deleteListing(id, token) {
+async function deleteListing(id, body, user, url) {
   const idx = DB.listings.findIndex((x) => x.id === id);
   if (idx === -1) return { status: 404, body: { error: 'Оголошення не знайдено.' } };
   const l = DB.listings[idx];
-  if (!token || sha256(token) !== l.editTokenHash) {
-    return { status: 403, body: { error: 'Немає прав на видалення.' } };
-  }
+  if (!canManage(l, user, body, url)) return { status: 403, body: { error: 'Немає прав на видалення.' } };
   await removeImageFiles(l.images);
   DB.listings.splice(idx, 1);
   await saveDB();
   return { status: 200, body: { ok: true } };
 }
 
-function queryListings(params) {
+function queryListings(params, user) {
   let items = DB.listings.slice();
 
   const q = (params.get('q') || '').trim().toLowerCase();
@@ -304,6 +441,15 @@ function queryListings(params) {
   const max = params.get('max');
   const free = params.get('free');
   const sort = params.get('sort') || 'new';
+  const ownerId = params.get('owner');
+  const status = params.get('status'); // active|sold|all
+  const withPhoto = params.get('photo');
+
+  // За замовчуванням показуємо лише активні (крім фільтра за власником/статусом).
+  if (ownerId) items = items.filter((l) => l.userId === ownerId);
+  else if (status === 'all') { /* усі */ }
+  else if (status) items = items.filter((l) => l.status === status);
+  else items = items.filter((l) => l.status === 'active');
 
   if (q) {
     items = items.filter((l) =>
@@ -312,6 +458,7 @@ function queryListings(params) {
   if (category) items = items.filter((l) => l.category === category);
   if (city) items = items.filter((l) => (l.location || '').toLowerCase().includes(city));
   if (free === '1') items = items.filter((l) => l.isFree || l.price === 0);
+  if (withPhoto === '1') items = items.filter((l) => l.images && l.images.length);
   if (min) items = items.filter((l) => (l.price ?? Infinity) >= Number(min));
   if (max) items = items.filter((l) => (l.price ?? 0) <= Number(max));
 
@@ -319,7 +466,7 @@ function queryListings(params) {
     case 'cheap': items.sort((a, b) => (a.price ?? Infinity) - (b.price ?? Infinity)); break;
     case 'expensive': items.sort((a, b) => (b.price ?? -1) - (a.price ?? -1)); break;
     case 'popular': items.sort((a, b) => (b.views || 0) - (a.views || 0)); break;
-    default: items.sort((a, b) => (b.createdAt > a.createdAt ? 1 : -1));
+    default: items.sort((a, b) => ((b.bumpedAt || b.createdAt) > (a.bumpedAt || a.createdAt) ? 1 : -1));
   }
 
   const page = Math.max(1, Number(params.get('page')) || 1);
@@ -331,6 +478,130 @@ function queryListings(params) {
 }
 
 /* ----------------------------------------------------------------------------
+ * Повідомлення (чат)
+ * ------------------------------------------------------------------------- */
+
+function threadIdFor(listingId, userA, userB) {
+  // Стабільний ідентифікатор діалогу: оголошення + пара користувачів.
+  const pair = [userA, userB].sort().join(':');
+  return sha256(listingId + ':' + pair).slice(0, 16);
+}
+
+async function sendMessage(body, user) {
+  if (!user) return { status: 401, body: { error: 'Увійдіть, щоб писати повідомлення.' } };
+  const listing = DB.listings.find((x) => x.id === body.listingId);
+  if (!listing) return { status: 404, body: { error: 'Оголошення не знайдено.' } };
+  if (!listing.userId) return { status: 400, body: { error: 'У цього оголошення немає зареєстрованого власника. Скористайтеся телефоном/WhatsApp.' } };
+  if (listing.userId === user.id) return { status: 400, body: { error: 'Це ваше власне оголошення.' } };
+  const text = clampStr(body.text, 2000);
+  if (text.length < 1) return { status: 400, body: { error: 'Порожнє повідомлення.' } };
+
+  const toUserId = listing.userId;
+  const threadId = threadIdFor(listing.id, user.id, toUserId);
+  const msg = {
+    id: uid(14), listingId: listing.id, threadId,
+    fromUserId: user.id, toUserId, text,
+    createdAt: new Date().toISOString(), readBy: [user.id],
+  };
+  DB.messages.push(msg);
+  await saveDB();
+  return { status: 201, body: { message: msg } };
+}
+
+function listThreads(user) {
+  if (!user) return { status: 401, body: { error: 'Увійдіть, щоб бачити повідомлення.' } };
+  const mine = DB.messages.filter((m) => m.fromUserId === user.id || m.toUserId === user.id);
+  const byThread = new Map();
+  for (const m of mine) {
+    const prev = byThread.get(m.threadId);
+    if (!prev || m.createdAt > prev.createdAt) byThread.set(m.threadId, m);
+  }
+  const threads = [...byThread.values()].map((last) => {
+    const listing = DB.listings.find((x) => x.id === last.listingId);
+    const otherId = last.fromUserId === user.id ? last.toUserId : last.fromUserId;
+    const other = DB.users.find((u) => u.id === otherId);
+    const unread = mine.filter((m) => m.threadId === last.threadId && !m.readBy.includes(user.id)).length;
+    return {
+      threadId: last.threadId,
+      listing: listing ? { id: listing.id, title: listing.title, images: listing.images, price: listing.price, isFree: listing.isFree, status: listing.status } : null,
+      other: publicUser(other),
+      lastText: last.text, lastAt: last.createdAt,
+      lastFromMe: last.fromUserId === user.id,
+      unread,
+    };
+  }).sort((a, b) => (b.lastAt > a.lastAt ? 1 : -1));
+  return { status: 200, body: { threads } };
+}
+
+async function getThread(threadId, user) {
+  if (!user) return { status: 401, body: { error: 'Увійдіть.' } };
+  const msgs = DB.messages.filter((m) => m.threadId === threadId &&
+    (m.fromUserId === user.id || m.toUserId === user.id));
+  if (!msgs.length) return { status: 404, body: { error: 'Діалог не знайдено.' } };
+  let changed = false;
+  for (const m of msgs) {
+    if (!m.readBy.includes(user.id)) { m.readBy.push(user.id); changed = true; }
+  }
+  if (changed) await saveDB();
+  const first = msgs[0];
+  const listing = DB.listings.find((x) => x.id === first.listingId);
+  const otherId = first.fromUserId === user.id ? first.toUserId : first.fromUserId;
+  const other = DB.users.find((u) => u.id === otherId);
+  return {
+    status: 200,
+    body: {
+      threadId,
+      listing: listing ? publicListing(listing) : null,
+      other: publicUser(other),
+      messages: msgs.sort((a, b) => (a.createdAt > b.createdAt ? 1 : -1)),
+      me: user.id,
+    },
+  };
+}
+
+async function replyThread(threadId, body, user) {
+  if (!user) return { status: 401, body: { error: 'Увійдіть.' } };
+  const existing = DB.messages.find((m) => m.threadId === threadId &&
+    (m.fromUserId === user.id || m.toUserId === user.id));
+  if (!existing) return { status: 404, body: { error: 'Діалог не знайдено.' } };
+  const text = clampStr(body.text, 2000);
+  if (text.length < 1) return { status: 400, body: { error: 'Порожнє повідомлення.' } };
+  const toUserId = existing.fromUserId === user.id ? existing.toUserId : existing.fromUserId;
+  const msg = {
+    id: uid(14), listingId: existing.listingId, threadId,
+    fromUserId: user.id, toUserId, text,
+    createdAt: new Date().toISOString(), readBy: [user.id],
+  };
+  DB.messages.push(msg);
+  await saveDB();
+  return { status: 201, body: { message: msg } };
+}
+
+function unreadCount(user) {
+  if (!user) return { status: 200, body: { unread: 0 } };
+  const n = DB.messages.filter((m) => m.toUserId === user.id && !m.readBy.includes(user.id)).length;
+  return { status: 200, body: { unread: n } };
+}
+
+/* ----------------------------------------------------------------------------
+ * Скарги
+ * ------------------------------------------------------------------------- */
+
+async function createReport(body) {
+  const listing = DB.listings.find((x) => x.id === body.listingId);
+  if (!listing) return { status: 404, body: { error: 'Оголошення не знайдено.' } };
+  const report = {
+    id: uid(12), listingId: listing.id,
+    reason: clampStr(body.reason, 40) || 'other',
+    text: clampStr(body.text, 500),
+    createdAt: new Date().toISOString(), resolved: false,
+  };
+  DB.reports.push(report);
+  await saveDB();
+  return { status: 201, body: { ok: true } };
+}
+
+/* ----------------------------------------------------------------------------
  * Статика
  * ------------------------------------------------------------------------- */
 
@@ -338,7 +609,6 @@ async function serveStatic(req, res, urlPath) {
   let rel = decodeURIComponent(urlPath.split('?')[0]);
   if (rel === '/' || rel === '') rel = '/index.html';
 
-  // Захист від виходу за межі public/
   const filePath = path.normalize(path.join(PUBLIC_DIR, rel));
   if (!filePath.startsWith(PUBLIC_DIR)) {
     return send(res, 403, { error: 'Заборонено' });
@@ -357,7 +627,6 @@ async function serveStatic(req, res, urlPath) {
     });
     fssync.createReadStream(filePath).pipe(res);
   } catch {
-    // SPA-фолбек: будь-який невідомий шлях (без розширення) → index.html
     if (!path.extname(rel)) {
       try {
         const html = await fs.readFile(path.join(PUBLIC_DIR, 'index.html'));
@@ -374,25 +643,55 @@ async function serveStatic(req, res, urlPath) {
  * ------------------------------------------------------------------------- */
 
 async function handleApi(req, res, url) {
-  const parts = url.pathname.split('/').filter(Boolean); // ['api', 'listings', ':id?']
+  const parts = url.pathname.split('/').filter(Boolean); // ['api', resource, ...]
   const resource = parts[1];
+  const user = currentUser(req, url);
 
   try {
     if (resource === 'health') {
-      return send(res, 200, { ok: true, count: DB.listings.length, time: new Date().toISOString() });
+      return send(res, 200, { ok: true, listings: DB.listings.length, users: DB.users.length, time: new Date().toISOString() });
     }
 
-    if (resource === 'meta') {
-      return send(res, 200, { count: DB.listings.length });
+    /* ---- Авторизація ---- */
+    if (resource === 'auth') {
+      const action = parts[2];
+      if (req.method === 'POST' && action === 'register') {
+        const r = await registerUser(await readBody(req));
+        return send(res, r.status, r.body);
+      }
+      if (req.method === 'POST' && action === 'login') {
+        const r = await loginUser(await readBody(req));
+        return send(res, r.status, r.body);
+      }
+      if (req.method === 'POST' && action === 'logout') {
+        const token = getToken(req, url);
+        if (token) { delete DB.sessions[token]; await saveDB(); }
+        return send(res, 200, { ok: true });
+      }
+      if (req.method === 'GET' && action === 'me') {
+        return send(res, 200, { user: selfUser(user) });
+      }
+      if (req.method === 'PUT' && action === 'me') {
+        if (!user) return send(res, 401, { error: 'Не авторизовано.' });
+        const r = await updateProfile(user, await readBody(req));
+        return send(res, r.status, r.body);
+      }
     }
 
+    /* ---- Публічний профіль ---- */
+    if (resource === 'users' && parts[2]) {
+      const u = DB.users.find((x) => x.id === parts[2]);
+      if (!u) return send(res, 404, { error: 'Користувача не знайдено.' });
+      const active = DB.listings.filter((l) => l.userId === u.id && l.status === 'active').length;
+      return send(res, 200, { user: publicUser(u), stats: { active } });
+    }
+
+    /* ---- Оголошення ---- */
     if (resource === 'listings') {
       const id = parts[2];
-
       if (req.method === 'GET' && !id) {
-        return send(res, 200, queryListings(url.searchParams));
+        return send(res, 200, queryListings(url.searchParams, user));
       }
-
       if (req.method === 'GET' && id) {
         const l = DB.listings.find((x) => x.id === id);
         if (!l) return send(res, 404, { error: 'Оголошення не знайдено.' });
@@ -400,24 +699,49 @@ async function handleApi(req, res, url) {
         saveDB();
         return send(res, 200, { listing: publicListing(l) });
       }
-
       if (req.method === 'POST' && !id) {
-        const body = await readBody(req);
-        const r = await createListing(body);
+        const r = await createListing(await readBody(req), user);
         return send(res, r.status, r.body);
       }
-
       if ((req.method === 'PUT' || req.method === 'PATCH') && id) {
-        const body = await readBody(req);
-        const r = await updateListing(id, body);
+        const r = await updateListing(id, await readBody(req), user, url);
         return send(res, r.status, r.body);
       }
-
       if (req.method === 'DELETE' && id) {
-        const token = url.searchParams.get('token') || (await readBody(req).catch(() => ({}))).editToken;
-        const r = await deleteListing(id, token);
+        const body = await readBody(req).catch(() => ({}));
+        const r = await deleteListing(id, body, user, url);
         return send(res, r.status, r.body);
       }
+    }
+
+    /* ---- Повідомлення ---- */
+    if (resource === 'messages') {
+      const sub = parts[2];
+      if (req.method === 'GET' && sub === 'unread') {
+        return send(res, 200, unreadCount(user).body);
+      }
+      if (req.method === 'GET' && !sub) {
+        const r = listThreads(user);
+        return send(res, r.status, r.body);
+      }
+      if (req.method === 'POST' && !sub) {
+        const r = await sendMessage(await readBody(req), user);
+        return send(res, r.status, r.body);
+      }
+      if (req.method === 'GET' && sub) {
+        const r = await getThread(sub, user);
+        return send(res, r.status, r.body);
+      }
+      if (req.method === 'POST' && sub) {
+        const r = await replyThread(sub, await readBody(req), user);
+        return send(res, r.status, r.body);
+      }
+    }
+
+    /* ---- Скарги ---- */
+    if (resource === 'reports' && req.method === 'POST') {
+      const r = await createReport(await readBody(req));
+      return send(res, r.status, r.body);
     }
 
     return send(res, 404, { error: 'Невідомий маршрут API.' });
@@ -435,10 +759,9 @@ async function handleApi(req, res, url) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
-  // CORS (зручно для розробки / окремого фронтенду)
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
     return res.end();
@@ -453,6 +776,6 @@ const server = http.createServer(async (req, res) => {
 loadDB().then(() => {
   server.listen(PORT, HOST, () => {
     console.log(`\n  ОголошенняUK ▸ http://localhost:${PORT}`);
-    console.log(`  Оголошень у базі: ${DB.listings.length}\n`);
+    console.log(`  Оголошень: ${DB.listings.length} · Користувачів: ${DB.users.length}\n`);
   });
 });

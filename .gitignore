@@ -7,5 +7,6 @@ npm-debug.log*
 public/uploads/*
 !public/uploads/.gitkeep
 data/listings.runtime.json
+data/db.runtime.json
 .env
 .env.local
