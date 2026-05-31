@@ -50,7 +50,13 @@ export const api = {
   logout() { return request('/api/auth/logout', { method: 'POST' }); },
   me() { return request('/api/auth/me'); },
   updateProfile(payload) { return request('/api/auth/me', { method: 'PUT', body: JSON.stringify(payload) }); },
+  forgotPassword(email) { return request('/api/auth/forgot', { method: 'POST', body: JSON.stringify({ email }) }); },
+  resetPassword(token, password) { return request('/api/auth/reset', { method: 'POST', body: JSON.stringify({ token, password }) }); },
   userProfile(id) { return request('/api/users/' + encodeURIComponent(id)); },
+
+  // -- Відгуки --
+  reviews(sellerId) { return request('/api/users/' + encodeURIComponent(sellerId) + '/reviews'); },
+  addReview(sellerId, rating, text) { return request('/api/users/' + encodeURIComponent(sellerId) + '/reviews', { method: 'POST', body: JSON.stringify({ rating, text }) }); },
 
   // -- Повідомлення --
   threads() { return request('/api/messages'); },

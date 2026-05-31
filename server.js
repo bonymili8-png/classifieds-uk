@@ -59,6 +59,8 @@ let DB = {
   sessions: {},   // token -> { userId, createdAt }
   messages: [],   // { id, listingId, threadId, fromUserId, toUserId, text, createdAt, readBy:[] }
   reports: [],    // { id, listingId, reason, text, createdAt, resolved }
+  reviews: [],    // { id, sellerId, authorId, rating, text, createdAt }
+  resets: {},     // token -> { userId, expiresAt }
 };
 
 async function ensureDirs() {
@@ -87,6 +89,8 @@ async function loadDB() {
   DB.sessions ||= {};
   DB.messages ||= [];
   DB.reports ||= [];
+  DB.reviews ||= [];
+  DB.resets ||= {};
   // Дефолтні поля для старих оголошень.
   for (const l of DB.listings) {
     l.status ||= 'active';
@@ -268,9 +272,20 @@ function isAdmin(user) {
   return false;
 }
 
+// Зведений рейтинг продавця: середнє і кількість відгуків.
+function sellerRating(sellerId) {
+  const rs = DB.reviews.filter((r) => r.sellerId === sellerId);
+  if (!rs.length) return { avg: 0, count: 0 };
+  const sum = rs.reduce((a, r) => a + r.rating, 0);
+  return { avg: Math.round((sum / rs.length) * 10) / 10, count: rs.length };
+}
+
 function publicUser(u) {
   if (!u) return null;
-  return { id: u.id, name: u.name, city: u.city || '', avatar: u.avatar || '', createdAt: u.createdAt };
+  return {
+    id: u.id, name: u.name, city: u.city || '', avatar: u.avatar || '',
+    createdAt: u.createdAt, rating: sellerRating(u.id),
+  };
 }
 function selfUser(u) {
   if (!u) return null;
@@ -619,6 +634,108 @@ async function createReport(body) {
 }
 
 /* ----------------------------------------------------------------------------
+ * Відгуки про продавців
+ * ------------------------------------------------------------------------- */
+
+function reviewView(r) {
+  const author = DB.users.find((u) => u.id === r.authorId);
+  return {
+    id: r.id, sellerId: r.sellerId, rating: r.rating, text: r.text,
+    createdAt: r.createdAt, author: publicUserLite(author),
+  };
+}
+// Полегшена версія без рейтингу (щоб уникнути рекурсії sellerRating).
+function publicUserLite(u) {
+  if (!u) return null;
+  return { id: u.id, name: u.name, avatar: u.avatar || '' };
+}
+
+function listReviews(sellerId) {
+  const reviews = DB.reviews
+    .filter((r) => r.sellerId === sellerId)
+    .sort((a, b) => (b.createdAt > a.createdAt ? 1 : -1))
+    .map(reviewView);
+  return { status: 200, body: { reviews, rating: sellerRating(sellerId) } };
+}
+
+async function createReview(sellerId, body, user) {
+  if (!user) return { status: 401, body: { error: 'Увійдіть, щоб залишити відгук.' } };
+  const seller = DB.users.find((u) => u.id === sellerId);
+  if (!seller) return { status: 404, body: { error: 'Продавця не знайдено.' } };
+  if (seller.id === user.id) return { status: 400, body: { error: 'Не можна оцінювати власний профіль.' } };
+
+  const rating = Math.round(Number(body.rating));
+  if (!Number.isFinite(rating) || rating < 1 || rating > 5) {
+    return { status: 400, body: { error: 'Оцінка має бути від 1 до 5.' } };
+  }
+  const text = clampStr(body.text, 600);
+
+  // Один відгук на пару (автор → продавець): оновлюємо наявний.
+  let review = DB.reviews.find((r) => r.sellerId === sellerId && r.authorId === user.id);
+  if (review) {
+    review.rating = rating; review.text = text; review.createdAt = new Date().toISOString();
+  } else {
+    review = { id: uid(12), sellerId, authorId: user.id, rating, text, createdAt: new Date().toISOString() };
+    DB.reviews.push(review);
+  }
+  await saveDB();
+  return { status: 201, body: { review: reviewView(review), rating: sellerRating(sellerId) } };
+}
+
+/* ----------------------------------------------------------------------------
+ * Скидання пароля (одноразовий токен)
+ * ------------------------------------------------------------------------- */
+
+const RESET_TTL = 1000 * 60 * 30; // 30 хвилин
+
+async function requestPasswordReset(body) {
+  const email = clampStr(body.email, 120).toLowerCase();
+  const user = DB.users.find((u) => u.email === email);
+  // Завжди відповідаємо однаково, щоб не розкривати наявність акаунта.
+  const generic = { ok: true, message: 'Якщо такий email існує, ми надішлемо інструкції.' };
+  if (!user) return { status: 200, body: generic };
+
+  // Чистимо протухлі токени.
+  const now = Date.now();
+  for (const [tok, r] of Object.entries(DB.resets)) {
+    if (r.expiresAt < now) delete DB.resets[tok];
+  }
+  const token = crypto.randomBytes(24).toString('hex');
+  DB.resets[token] = { userId: user.id, expiresAt: now + RESET_TTL };
+  await saveDB();
+
+  // У реальному застосунку токен надсилається листом. Тут — лог + повертаємо
+  // resetToken ЛИШЕ якщо EXPOSE_RESET_TOKEN=1 (для self-host/демо/тестів).
+  console.log(`[reset] токен для ${email}: ${token}`);
+  const out = { ...generic };
+  if (process.env.EXPOSE_RESET_TOKEN === '1') out.resetToken = token;
+  return { status: 200, body: out };
+}
+
+async function performPasswordReset(body) {
+  const token = String(body.token || '');
+  const password = String(body.password || '');
+  const entry = DB.resets[token];
+  if (!entry || entry.expiresAt < Date.now()) {
+    return { status: 400, body: { error: 'Посилання недійсне або застаріле.' } };
+  }
+  if (password.length < 6) return { status: 400, body: { error: 'Пароль має містити мінімум 6 символів.' } };
+  const user = DB.users.find((u) => u.id === entry.userId);
+  if (!user) return { status: 400, body: { error: 'Користувача не знайдено.' } };
+
+  const { salt, hash } = hashPassword(password);
+  user.salt = salt; user.hash = hash;
+  delete DB.resets[token];
+  // Інвалідовуємо всі активні сесії користувача задля безпеки.
+  for (const [tok, s] of Object.entries(DB.sessions)) {
+    if (s.userId === user.id) delete DB.sessions[tok];
+  }
+  const newToken = issueSession(user.id);
+  await saveDB();
+  return { status: 200, body: { token: newToken, user: selfUser(user) } };
+}
+
+/* ----------------------------------------------------------------------------
  * Адмін / модерація
  * ------------------------------------------------------------------------- */
 
@@ -748,11 +865,34 @@ async function handleApi(req, res, url) {
         const r = await updateProfile(user, await readBody(req));
         return send(res, r.status, r.body);
       }
+      if (req.method === 'POST' && action === 'forgot') {
+        const r = await requestPasswordReset(await readBody(req));
+        return send(res, r.status, r.body);
+      }
+      if (req.method === 'POST' && action === 'reset') {
+        const r = await performPasswordReset(await readBody(req));
+        return send(res, r.status, r.body);
+      }
     }
 
-    /* ---- Публічний профіль ---- */
+    /* ---- Публічний профіль + відгуки ---- */
     if (resource === 'users' && parts[2]) {
-      const u = DB.users.find((x) => x.id === parts[2]);
+      const sellerId = parts[2];
+      const sub = parts[3];
+
+      // /api/users/:id/reviews
+      if (sub === 'reviews') {
+        if (req.method === 'GET') {
+          const r = listReviews(sellerId);
+          return send(res, r.status, r.body);
+        }
+        if (req.method === 'POST') {
+          const r = await createReview(sellerId, await readBody(req), user);
+          return send(res, r.status, r.body);
+        }
+      }
+
+      const u = DB.users.find((x) => x.id === sellerId);
       if (!u) return send(res, 404, { error: 'Користувача не знайдено.' });
       const active = DB.listings.filter((l) => l.userId === u.id && l.status === 'active').length;
       return send(res, 200, { user: publicUser(u), stats: { active } });

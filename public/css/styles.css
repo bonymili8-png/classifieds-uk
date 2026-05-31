@@ -450,3 +450,19 @@ label.lbl .req { color: var(--danger); }
 .reason-wrong { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
 .report-text { margin: 4px 0 8px; }
 .report-listing { display: block; padding: 9px 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm); font-size: .9rem; }
+
+/* -------- Рейтинги та відгуки -------- */
+.stars { display: inline-flex; gap: 2px; line-height: 1; }
+.stars .star { color: var(--border); font-size: 1.05rem; }
+.stars .star.on { color: #f5a623; }
+.stars-input .star { background: none; border: 0; cursor: pointer; font-size: 1.9rem; padding: 0 2px; transition: transform .1s; }
+.stars-input .star:hover { transform: scale(1.15); }
+.rating-badge { display: inline-flex; align-items: center; gap: 6px; font-size: .92rem; }
+.rating-badge b { font-weight: 800; }
+.rating-badge small { color: var(--muted); }
+
+.review-list { display: flex; flex-direction: column; gap: 12px; }
+.review-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: 14px; }
+.review-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.review-author { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; }
+.review-text { margin: 8px 0 0; line-height: 1.55; white-space: pre-wrap; }

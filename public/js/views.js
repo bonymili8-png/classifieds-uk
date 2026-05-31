@@ -57,6 +57,23 @@ function avatarHTML(user, size = 40) {
   return `<span class="avatar avatar-letter" style="width:${size}px;height:${size}px;font-size:${size * 0.42}px">${esc(initials)}</span>`;
 }
 
+// Зорі рейтингу. rating = {avg, count}. interactive=true → клікабельні для вводу.
+function starsHTML(avg, { interactive = false } = {}) {
+  let out = '';
+  for (let i = 1; i <= 5; i++) {
+    const cls = i <= Math.round(avg) ? 'star on' : 'star';
+    out += interactive
+      ? `<button type="button" class="${cls}" data-star="${i}" aria-label="${i}">★</button>`
+      : `<span class="${cls}">★</span>`;
+  }
+  return `<span class="stars ${interactive ? 'stars-input' : ''}">${out}</span>`;
+}
+
+function ratingBadgeHTML(rating) {
+  if (!rating || !rating.count) return `<span class="rating-badge muted">${starsHTML(0)} <small>${esc(t('rev.noRating'))}</small></span>`;
+  return `<span class="rating-badge">${starsHTML(rating.avg)} <b>${rating.avg}</b> <small>(${t('rev.count', { n: rating.count })})</small></span>`;
+}
+
 /* ============================ Головна ============================ */
 
 export const HomeView = {
@@ -254,6 +271,7 @@ export const DetailView = {
             ${avatarHTML(l.owner, 46)}
             <span><b>${esc(l.owner.name)}</b><small class="muted">${l.owner.city ? esc(l.owner.city) + ' · ' : ''}${esc(timeAgo(l.owner.createdAt))}</small></span>
           </a>
+          <div class="mt8">${ratingBadgeHTML(l.owner.rating)}</div>
         </div>` : '';
 
       el.innerHTML = `
@@ -442,6 +460,42 @@ export const FormView = {
     $('#waSame').addEventListener('change', (e) => { $('#waWrap').style.display = e.target.checked ? 'none' : ''; });
     $('#isFree').addEventListener('change', (e) => { $('#price').disabled = e.target.checked; if (e.target.checked) $('#price').value = ''; });
 
+    /* -------- Автозбереження чернетки (лише для нового оголошення) -------- */
+    const DRAFT_KEY = 'ouk:draft';
+    const TEXT_FIELDS = ['#title', '#description', '#category', '#location', '#price', '#phone', '#telegram'];
+    const clearDraft = () => localStorage.removeItem(DRAFT_KEY);
+    const saveDraft = () => {
+      if (editing) return;
+      const d = {};
+      TEXT_FIELDS.forEach((f) => { d[f] = $(f).value; });
+      d.isFree = $('#isFree').checked;
+      try { localStorage.setItem(DRAFT_KEY, JSON.stringify(d)); } catch { /* quota */ }
+    };
+    if (!editing) {
+      let draft = null;
+      try { draft = JSON.parse(localStorage.getItem(DRAFT_KEY)); } catch { draft = null; }
+      const hasContent = draft && (draft['#title'] || draft['#description']);
+      if (hasContent) {
+        TEXT_FIELDS.forEach((f) => { if (draft[f] != null) $(f).value = draft[f]; });
+        $('#isFree').checked = !!draft.isFree;
+        $('#price').disabled = !!draft.isFree;
+        $('#cTitle').textContent = $('#title').value.length;
+        $('#cDesc').textContent = $('#description').value.length;
+        $('#formAlert').innerHTML = `<div class="alert alert-info">${esc(t('draft.restored'))} · <a href="#" id="clearDraft"><b>${esc(t('draft.clear'))}</b></a></div>`;
+        const cd = $('#clearDraft');
+        if (cd) cd.addEventListener('click', (e) => {
+          e.preventDefault();
+          clearDraft();
+          TEXT_FIELDS.forEach((f) => { $(f).value = ''; });
+          $('#isFree').checked = false; $('#price').disabled = false;
+          $('#cTitle').textContent = 0; $('#cDesc').textContent = 0;
+          $('#formAlert').innerHTML = '';
+        });
+      }
+      TEXT_FIELDS.forEach((f) => $(f).addEventListener('input', saveDraft));
+      $('#isFree').addEventListener('change', saveDraft);
+    }
+
     function renderThumbs() {
       $('#thumbs').innerHTML = images.map((src, i) => `
         <div class="thumb">
@@ -529,6 +583,7 @@ export const FormView = {
         } else {
           const { listing, editToken } = await api.create(payload);
           if (editToken) store.addMine(listing.id, editToken, listing.title);
+          clearDraft();
           ctx.toast(t('form.publish') + ' ✓');
           location.hash = '#/l/' + listing.id;
         }
@@ -663,17 +718,51 @@ export const UserView = {
   },
   async mount(root, ctx) {
     const el = root.querySelector('#userRoot');
+    const sellerId = ctx.params.id;
     try {
-      const { user, stats } = await api.userProfile(ctx.params.id);
-      const { items } = await api.list({ owner: ctx.params.id, perPage: 48 });
+      const { user, stats } = await api.userProfile(sellerId);
+      const { items } = await api.list({ owner: sellerId, perPage: 48 });
+      const isSelf = session.isAuthed && session.user.id === sellerId;
+
       el.innerHTML = `
         <div class="profile-head">
           ${avatarHTML(user, 64)}
           <div class="profile-meta"><h1>${esc(user.name)}</h1>
-            <p class="muted">${user.city ? esc(user.city) + ' · ' : ''}${stats.active} ${esc(t('profile.activeAds'))} · ${esc(t('profile.memberSince'))} ${esc(timeAgo(user.createdAt))}</p></div>
+            <p class="muted">${user.city ? esc(user.city) + ' · ' : ''}${stats.active} ${esc(t('profile.activeAds'))} · ${esc(t('profile.memberSince'))} ${esc(timeAgo(user.createdAt))}</p>
+            <div class="mt8">${ratingBadgeHTML(user.rating)}</div></div>
         </div>
-        <div class="section-head"><h2>${esc(t('detail.otherAds'))}</h2></div>
+
+        <div class="section-head"><h2>${esc(t('rev.title'))}</h2>
+          ${!isSelf ? `<button class="btn btn-sm" id="reviewBtn">★ ${esc(t('rev.leave'))}</button>` : ''}</div>
+        <div id="reviewsBox">${gridSkeleton(2)}</div>
+
+        <div class="section-head" style="margin-top:26px"><h2>${esc(t('detail.otherAds'))}</h2></div>
         ${items.length ? `<div class="grid">${items.map(cardHTML).join('')}</div>` : emptyHTML(t('empty.title'), '')}`;
+
+      async function loadReviews() {
+        const box = el.querySelector('#reviewsBox');
+        try {
+          const { reviews } = await api.reviews(sellerId);
+          box.innerHTML = reviews.length
+            ? `<div class="review-list">${reviews.map((r) => `
+                <div class="review-card">
+                  <div class="review-head">
+                    <a class="review-author" href="#/u/${r.author ? r.author.id : ''}" data-link>${avatarHTML(r.author, 34)}<b>${esc(r.author ? r.author.name : '—')}</b></a>
+                    <span class="muted">${esc(timeAgo(r.createdAt))}</span>
+                  </div>
+                  ${starsHTML(r.rating)}
+                  ${r.text ? `<p class="review-text">${esc(r.text)}</p>` : ''}
+                </div>`).join('')}</div>`
+            : emptyHTML(t('rev.none'), '');
+        } catch (e) { box.innerHTML = `<div class="alert alert-error">${esc(e.message)}</div>`; }
+      }
+      loadReviews();
+
+      const reviewBtn = el.querySelector('#reviewBtn');
+      if (reviewBtn) reviewBtn.addEventListener('click', () => {
+        if (!session.isAuthed) { ctx.toast(t('rev.loginFirst')); location.hash = '#/login'; return; }
+        openReviewModal(sellerId, ctx, loadReviews);
+      });
     } catch (e) {
       el.innerHTML = emptyHTML(t('empty.title'), e.message);
     }
@@ -696,6 +785,7 @@ export const AuthView = {
           ${isRegister ? `<div class="field"><label class="lbl">${esc(t('auth.city'))}</label><input class="input" id="aCity" list="cityList2"><datalist id="cityList2">${CITIES.map((c) => `<option value="${c}">`).join('')}</datalist></div>` : ''}
           <button class="btn btn-primary btn-lg btn-block" id="authBtn" type="submit">${isRegister ? esc(t('auth.register')) : esc(t('auth.login'))}</button>
         </form>
+        ${!isRegister ? `<p class="center mt8"><a href="#/forgot" data-link class="muted">${esc(t('pwd.forgot'))}</a></p>` : ''}
         <p class="center mt16"><a href="#/${isRegister ? 'login' : 'register'}" data-link>${isRegister ? esc(t('auth.haveAccount')) : esc(t('auth.noAccount'))}</a></p>
       </div></div>`;
   },
@@ -716,6 +806,73 @@ export const AuthView = {
         location.hash = '#/profile';
       } catch (err) {
         $('#authAlert').innerHTML = `<div class="alert alert-error">${esc(err.message)}</div>`;
+        btn.disabled = false;
+      }
+    });
+  },
+};
+
+// Запит на відновлення пароля
+export const ForgotView = {
+  async render() {
+    return `<div class="container narrow">
+      <div class="form-card auth-card">
+        <h1 style="margin:0 0 8px;font-size:1.5rem;text-align:center">${esc(t('pwd.forgotTitle'))}</h1>
+        <p class="muted center" style="margin:0 0 18px">${esc(t('pwd.forgotIntro'))}</p>
+        <div id="fpAlert"></div>
+        <form id="fpForm" class="form-grid">
+          <div class="field"><label class="lbl">${esc(t('auth.email'))}</label><input class="input" id="fpEmail" type="email" autocomplete="email" required></div>
+          <button class="btn btn-primary btn-lg btn-block" id="fpBtn" type="submit">${esc(t('pwd.sendLink'))}</button>
+        </form>
+        <p class="center mt16"><a href="#/login" data-link>‹ ${esc(t('auth.login'))}</a></p>
+      </div></div>`;
+  },
+  async mount(root, ctx) {
+    const $ = (s) => root.querySelector(s);
+    $('#fpForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = $('#fpBtn'); btn.disabled = true;
+      try {
+        const res = await api.forgotPassword($('#fpEmail').value);
+        // Демо-режим: сервер може повернути resetToken (EXPOSE_RESET_TOKEN=1).
+        const demo = res.resetToken
+          ? `<div class="alert alert-info mt16">${esc(t('pwd.demoToken'))}<br><a href="#/reset?token=${encodeURIComponent(res.resetToken)}" data-link><b>${esc(t('pwd.resetTitle'))} →</b></a></div>`
+          : '';
+        $('#fpAlert').innerHTML = `<div class="alert alert-success">${esc(t('pwd.sent'))}</div>${demo}`;
+      } catch (err) {
+        $('#fpAlert').innerHTML = `<div class="alert alert-error">${esc(err.message)}</div>`;
+      } finally { btn.disabled = false; }
+    });
+  },
+};
+
+// Встановлення нового пароля за токеном
+export const ResetView = {
+  async render(ctx) {
+    const token = ctx.query.token || '';
+    return `<div class="container narrow">
+      <div class="form-card auth-card">
+        <h1 style="margin:0 0 18px;font-size:1.5rem;text-align:center">${esc(t('pwd.resetTitle'))}</h1>
+        <div id="rpAlert"></div>
+        <form id="rpForm" class="form-grid">
+          <div class="field"><label class="lbl">${esc(t('pwd.newPassword'))}</label><input class="input" id="rpPass" type="password" autocomplete="new-password" required></div>
+          <input type="hidden" id="rpToken" value="${esc(token)}">
+          <button class="btn btn-primary btn-lg btn-block" id="rpBtn" type="submit">${esc(t('pwd.setPassword'))}</button>
+        </form>
+      </div></div>`;
+  },
+  async mount(root, ctx) {
+    const $ = (s) => root.querySelector(s);
+    $('#rpForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = $('#rpBtn'); btn.disabled = true;
+      try {
+        const res = await api.resetPassword($('#rpToken').value, $('#rpPass').value);
+        session.set(res.token, res.user);
+        ctx.toast(t('pwd.done'));
+        location.hash = '#/profile';
+      } catch (err) {
+        $('#rpAlert').innerHTML = `<div class="alert alert-error">${esc(err.message)}</div>`;
         btn.disabled = false;
       }
     });
@@ -914,6 +1071,36 @@ function openReport(listingId, ctx) {
     try {
       await api.report(listingId, back.querySelector('#rReason').value, back.querySelector('#rText').value);
       ctx.toast(t('report.thanks')); close();
+    } catch (e) { ctx.toast(e.message); }
+  });
+}
+
+function openReviewModal(sellerId, ctx, onDone) {
+  let chosen = 0;
+  const { back, close } = modal(`
+    <h2 style="margin:0 0 14px">${esc(t('rev.leave'))}</h2>
+    <div class="field"><label class="lbl">${esc(t('rev.yourRating'))}</label>
+      <div id="starInput">${starsHTML(0, { interactive: true })}</div></div>
+    <div class="field mt16"><label class="lbl">${esc(t('rev.comment'))}</label>
+      <textarea class="textarea" id="revText" maxlength="600"></textarea></div>
+    <div class="row-gap mt16"><button class="btn btn-ghost" id="revCancel">${esc(t('common.cancel'))}</button>
+      <button class="btn btn-primary" id="revSubmit" disabled>${esc(t('rev.submit'))}</button></div>`);
+
+  const starWrap = back.querySelector('#starInput');
+  const paint = (val) => starWrap.querySelectorAll('.star').forEach((s, i) => s.classList.toggle('on', i < val));
+  starWrap.querySelectorAll('[data-star]').forEach((s) => {
+    s.addEventListener('mouseenter', () => paint(Number(s.dataset.star)));
+    s.addEventListener('click', () => { chosen = Number(s.dataset.star); paint(chosen); back.querySelector('#revSubmit').disabled = false; });
+  });
+  starWrap.addEventListener('mouseleave', () => paint(chosen));
+
+  back.querySelector('#revCancel').addEventListener('click', close);
+  back.querySelector('#revSubmit').addEventListener('click', async () => {
+    if (!chosen) return;
+    try {
+      await api.addReview(sellerId, chosen, back.querySelector('#revText').value);
+      ctx.toast(t('rev.thanks')); close();
+      if (onDone) onDone();
     } catch (e) { ctx.toast(e.message); }
   });
 }

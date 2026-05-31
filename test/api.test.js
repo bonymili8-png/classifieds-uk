@@ -34,7 +34,7 @@ before(async () => {
 
   child = spawn(process.execPath, ['server.js'], {
     cwd: ROOT,
-    env: { ...process.env, PORT: String(PORT), HOST: '127.0.0.1', ADMIN_EMAILS: 'admin@test.dev' },
+    env: { ...process.env, PORT: String(PORT), HOST: '127.0.0.1', ADMIN_EMAILS: 'admin@test.dev', EXPOSE_RESET_TOKEN: '1' },
     stdio: 'ignore',
   });
 
@@ -325,6 +325,80 @@ test('адмін видаляє будь-яке оголошення', async () 
   assert.equal(status, 200);
   const check = await req('GET', '/api/listings/' + listingId);
   assert.equal(check.status, 404);
+});
+
+/* ============================ Відгуки ============================ */
+
+test('покупець залишає відгук про продавця', async () => {
+  const { status, json } = await req('POST', `/api/users/${userA}/reviews`, {
+    token: tokenB, body: { rating: 5, text: 'Чудовий продавець!' },
+  });
+  assert.equal(status, 201);
+  assert.equal(json.rating.count, 1);
+  assert.equal(json.rating.avg, 5);
+  assert.equal(json.review.author.name, 'Іван');
+});
+
+test('не можна оцінити власний профіль (400)', async () => {
+  const { status } = await req('POST', `/api/users/${userA}/reviews`, { token: tokenA, body: { rating: 5 } });
+  assert.equal(status, 400);
+});
+
+test('некоректна оцінка відхиляється (400)', async () => {
+  const { status } = await req('POST', `/api/users/${userA}/reviews`, { token: tokenB, body: { rating: 9 } });
+  assert.equal(status, 400);
+});
+
+test('анонімний відгук відхиляється (401)', async () => {
+  const { status } = await req('POST', `/api/users/${userA}/reviews`, { body: { rating: 3 } });
+  assert.equal(status, 401);
+});
+
+test('повторний відгук оновлює, а не дублює', async () => {
+  await req('POST', `/api/users/${userA}/reviews`, { token: tokenB, body: { rating: 4, text: 'Оновлено' } });
+  const { json } = await req('GET', `/api/users/${userA}/reviews`);
+  assert.equal(json.rating.count, 1);
+  assert.equal(json.rating.avg, 4);
+});
+
+test('профіль містить агрегований рейтинг', async () => {
+  const { json } = await req('GET', '/api/users/' + userA);
+  assert.equal(json.user.rating.count, 1);
+  assert.equal(json.user.rating.avg, 4);
+});
+
+/* ============================ Скидання пароля ============================ */
+
+test('forgot для невідомого email — узагальнена 200 без токена', async () => {
+  const { status, json } = await req('POST', '/api/auth/forgot', { body: { email: 'nobody@test.dev' } });
+  assert.equal(status, 200);
+  assert.equal(json.ok, true);
+  assert.equal(json.resetToken, undefined);
+});
+
+test('повний цикл скидання пароля', async () => {
+  // Окремий користувач, щоб не чіпати інші сесії.
+  await req('POST', '/api/auth/register', { body: { name: 'Реset', email: 'reset@test.dev', password: 'oldpass123' } });
+
+  const forgot = await req('POST', '/api/auth/forgot', { body: { email: 'reset@test.dev' } });
+  assert.ok(forgot.json.resetToken, 'демо-режим повертає resetToken');
+  const rtoken = forgot.json.resetToken;
+
+  // Поганий токен / короткий пароль.
+  assert.equal((await req('POST', '/api/auth/reset', { body: { token: 'BAD', password: 'newpass123' } })).status, 400);
+  assert.equal((await req('POST', '/api/auth/reset', { body: { token: rtoken, password: '12' } })).status, 400);
+
+  // Успішне скидання → нова сесія.
+  const reset = await req('POST', '/api/auth/reset', { body: { token: rtoken, password: 'newpass123' } });
+  assert.equal(reset.status, 200);
+  assert.ok(reset.json.token);
+
+  // Старий пароль не працює, новий — працює.
+  assert.equal((await req('POST', '/api/auth/login', { body: { email: 'reset@test.dev', password: 'oldpass123' } })).status, 401);
+  assert.equal((await req('POST', '/api/auth/login', { body: { email: 'reset@test.dev', password: 'newpass123' } })).status, 200);
+
+  // Токен одноразовий.
+  assert.equal((await req('POST', '/api/auth/reset', { body: { token: rtoken, password: 'another123' } })).status, 400);
 });
 
 /* ============================ Профіль ============================ */

@@ -4,6 +4,7 @@ import { store, session, bootstrapSession, api } from './api.js';
 import {
   HomeView, SearchView, DetailView, FormView, SavedView, MineView,
   ProfileView, UserView, AuthView, ChatsView, ChatView, AdminView,
+  ForgotView, ResetView,
 } from './views.js';
 import { t, getLang, setLang } from './i18n.js';
 
@@ -76,6 +77,8 @@ function parseHash() {
     case 'profile': return { name: 'profile', params: {}, query };
     case 'login':  return { name: 'login', params: {}, query };
     case 'register': return { name: 'register', params: {}, query };
+    case 'forgot': return { name: 'forgot', params: {}, query };
+    case 'reset':  return { name: 'reset', params: {}, query };
     case 'chats':  return { name: 'chats', params: {}, query };
     case 'chat':   return { name: 'chat', params: { id: segs[1] }, query };
     case 'admin':  return { name: 'admin', params: {}, query };
@@ -87,6 +90,7 @@ const VIEWS = {
   home: HomeView, search: SearchView, detail: DetailView,
   new: FormView, edit: FormView, saved: SavedView, mine: MineView,
   profile: ProfileView, user: UserView, login: AuthView, register: AuthView,
+  forgot: ForgotView, reset: ResetView,
   chats: ChatsView, chat: ChatView, admin: AdminView,
 };
 
@@ -116,7 +120,8 @@ async function render() {
 
 function updateTabbar(ctx) {
   const map = { home: 'home', search: 'search', new: 'new', edit: 'new', saved: 'saved',
-    mine: 'profile', profile: 'profile', chats: 'chats', chat: 'chats', login: 'profile', register: 'profile' };
+    mine: 'profile', profile: 'profile', chats: 'chats', chat: 'chats', login: 'profile',
+    register: 'profile', forgot: 'profile', reset: 'profile', user: 'search' };
   const active = map[ctx.name];
   document.querySelectorAll('.tab').forEach((tb) => tb.classList.toggle('active', tb.dataset.tab === active));
 }
