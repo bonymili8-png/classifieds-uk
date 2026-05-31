@@ -792,6 +792,95 @@ export const ChatView = {
   },
 };
 
+/* ============================ Адмін / модерація ============================ */
+
+const REPORT_REASONS = {
+  spam: () => t('report.spam'), prohibited: () => t('report.prohibited'),
+  wrong: () => t('report.wrong'), other: () => t('report.other'),
+};
+
+export const AdminView = {
+  async render() {
+    if (!session.isAuthed || !session.user.isAdmin) { location.hash = '#/'; return ''; }
+    return `<div class="container">
+      <div class="section-head"><h2>🛡️ ${esc(t('admin.title'))}</h2></div>
+      <div class="admin-stats" id="adminStats">${gridSkeleton(4)}</div>
+      <div class="section-head" style="margin-top:26px">
+        <h2>${esc(t('admin.reports'))}</h2>
+        <div class="seg" id="repSeg">
+          <button class="seg-btn active" data-resolved="0">${esc(t('admin.open'))}</button>
+          <button class="seg-btn" data-resolved="1">${esc(t('admin.resolved'))}</button>
+        </div>
+      </div>
+      <div id="adminReports">${gridSkeleton(2)}</div>
+    </div>`;
+  },
+  async mount(root, ctx) {
+    if (!session.isAuthed || !session.user.isAdmin) return;
+    let showResolved = false;
+
+    async function loadStats() {
+      try {
+        const s = await api.adminStats();
+        const tiles = [
+          ['admin.statListings', s.listings], ['admin.statActive', s.active],
+          ['admin.statSold', s.sold], ['admin.statUsers', s.users],
+          ['admin.statMessages', s.messages], ['admin.statReports', s.reportsOpen],
+          ['admin.statToday', s.newListingsToday],
+        ];
+        root.querySelector('#adminStats').innerHTML = tiles.map(([k, v]) =>
+          `<div class="stat-tile"><div class="stat-n">${v}</div><div class="stat-l">${esc(t(k))}</div></div>`).join('');
+      } catch (e) { root.querySelector('#adminStats').innerHTML = `<div class="alert alert-error">${esc(e.message)}</div>`; }
+    }
+
+    async function loadReports() {
+      const box = root.querySelector('#adminReports');
+      box.innerHTML = gridSkeleton(2);
+      try {
+        const { reports } = await api.adminReports(showResolved);
+        if (!reports.length) { box.innerHTML = emptyHTML(t('admin.noReports'), ''); return; }
+        box.innerHTML = `<div class="report-list">${reports.map((r) => {
+          const reason = (REPORT_REASONS[r.reason] || REPORT_REASONS.other)();
+          return `<div class="report-card ${r.resolved ? 'is-resolved' : ''}">
+            <div class="report-head">
+              <span class="report-reason reason-${esc(r.reason)}">⚑ ${esc(reason)}</span>
+              <span class="muted">${esc(timeAgo(r.createdAt))}${r.resolved ? ' · ✓' : ''}</span>
+            </div>
+            ${r.text ? `<p class="report-text">${esc(r.text)}</p>` : ''}
+            ${r.listing
+              ? `<a class="report-listing" href="#/l/${r.listing.id}" data-link>📦 <b>${esc(r.listing.title)}</b> · ${esc(formatPrice(r.listing))} · ${esc(r.listing.location)}</a>`
+              : `<p class="muted">— ${esc(t('empty.title'))} —</p>`}
+            <div class="row-gap mt8">
+              ${r.listing ? `<a class="btn btn-sm" href="#/l/${r.listing.id}" data-link>${esc(t('admin.openListing'))}</a>` : ''}
+              ${!r.resolved ? `<button class="btn btn-sm" data-resolve="${r.id}">✓ ${esc(t('admin.resolve'))}</button>` : ''}
+              ${r.listing ? `<button class="btn btn-sm btn-danger" data-del="${r.listing.id}">🗑 ${esc(t('admin.delete'))}</button>` : ''}
+            </div></div>`;
+        }).join('')}</div>`;
+
+        box.querySelectorAll('[data-resolve]').forEach((b) => b.addEventListener('click', async () => {
+          try { await api.adminResolveReport(b.dataset.resolve); ctx.toast(t('admin.resolvedOk')); loadReports(); loadStats(); }
+          catch (e) { ctx.toast(e.message); }
+        }));
+        box.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', async () => {
+          if (!confirm(t('admin.delete') + '?')) return;
+          try { await api.adminDeleteListing(b.dataset.del); ctx.toast(t('admin.deleted')); loadReports(); loadStats(); }
+          catch (e) { ctx.toast(e.message); }
+        }));
+      } catch (e) { box.innerHTML = `<div class="alert alert-error">${esc(e.message)}</div>`; }
+    }
+
+    root.querySelectorAll('#repSeg .seg-btn').forEach((b) => b.addEventListener('click', () => {
+      root.querySelectorAll('#repSeg .seg-btn').forEach((x) => x.classList.remove('active'));
+      b.classList.add('active');
+      showResolved = b.dataset.resolved === '1';
+      loadReports();
+    }));
+
+    loadStats();
+    loadReports();
+  },
+};
+
 /* ============================ Модалки ============================ */
 
 function modal(html) {

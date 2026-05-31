@@ -429,3 +429,24 @@ label.lbl .req { color: var(--danger); }
 .lb-prev { left: -8px; } .lb-next { right: -8px; }
 @media (min-width: 700px) { .lb-prev { left: -64px; } .lb-next { right: -64px; } }
 .lb-count { position: absolute; bottom: -36px; left: 50%; transform: translateX(-50%); color: #fff; font-size: .85rem; opacity: .8; }
+
+/* -------- Адмін-панель -------- */
+.admin-stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+@media (min-width: 560px) { .admin-stats { grid-template-columns: repeat(4, 1fr); } }
+@media (min-width: 860px) { .admin-stats { grid-template-columns: repeat(7, 1fr); } }
+.stat-tile { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: 14px 12px; text-align: center; }
+.stat-n { font-size: 1.6rem; font-weight: 800; letter-spacing: -.02em; }
+.stat-l { font-size: .76rem; color: var(--muted); margin-top: 2px; }
+
+.seg { display: inline-flex; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-pill); padding: 3px; }
+.seg-btn { border: 0; background: transparent; color: var(--muted); padding: 6px 14px; border-radius: var(--r-pill); font-weight: 600; cursor: pointer; font-size: .85rem; }
+.seg-btn.active { background: var(--primary); color: var(--primary-ink); }
+
+.report-list { display: flex; flex-direction: column; gap: 12px; }
+.report-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: 14px; border-left: 3px solid var(--danger); }
+.report-card.is-resolved { border-left-color: var(--success); opacity: .75; }
+.report-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.report-reason { font-size: .78rem; font-weight: 700; padding: 3px 9px; border-radius: var(--r-pill); background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
+.reason-wrong { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+.report-text { margin: 4px 0 8px; }
+.report-listing { display: block; padding: 9px 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm); font-size: .9rem; }

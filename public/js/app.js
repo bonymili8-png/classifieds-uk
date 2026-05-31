@@ -3,7 +3,7 @@
 import { store, session, bootstrapSession, api } from './api.js';
 import {
   HomeView, SearchView, DetailView, FormView, SavedView, MineView,
-  ProfileView, UserView, AuthView, ChatsView, ChatView,
+  ProfileView, UserView, AuthView, ChatsView, ChatView, AdminView,
 } from './views.js';
 import { t, getLang, setLang } from './i18n.js';
 
@@ -78,6 +78,7 @@ function parseHash() {
     case 'register': return { name: 'register', params: {}, query };
     case 'chats':  return { name: 'chats', params: {}, query };
     case 'chat':   return { name: 'chat', params: { id: segs[1] }, query };
+    case 'admin':  return { name: 'admin', params: {}, query };
     default:       return { name: 'home', params: {}, query };
   }
 }
@@ -86,7 +87,7 @@ const VIEWS = {
   home: HomeView, search: SearchView, detail: DetailView,
   new: FormView, edit: FormView, saved: SavedView, mine: MineView,
   profile: ProfileView, user: UserView, login: AuthView, register: AuthView,
-  chats: ChatsView, chat: ChatView,
+  chats: ChatsView, chat: ChatView, admin: AdminView,
 };
 
 let renderId = 0;
@@ -128,7 +129,12 @@ function renderAuthArea() {
   if (!area) return;
   if (session.isAuthed) {
     const initials = (session.user.name || '?').slice(0, 1).toUpperCase();
-    area.innerHTML = `<a class="icon-btn" href="#/chats" data-link title="${t('chats.title')}" style="position:relative">
+    const adminLink = session.user.isAdmin
+      ? `<a class="icon-btn" href="#/admin" data-link title="${t('admin.nav')}" aria-label="${t('admin.nav')}">
+          <svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="1.7" d="M12 3 4 6v5c0 5 3.4 8.4 8 10 4.6-1.6 8-5 8-10V6z"/></svg></a>`
+      : '';
+    area.innerHTML = `${adminLink}
+      <a class="icon-btn" href="#/chats" data-link title="${t('chats.title')}" style="position:relative">
         <svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="1.7" d="M21 11.5a8.4 8.4 0 0 1-12 7.6L3 21l1.9-6A8.4 8.4 0 1 1 21 11.5Z"/></svg>
         <span class="nav-badge" id="navUnread" hidden></span></a>
       <a class="avatar-btn" href="#/profile" data-link title="${t('nav.profile')}">${session.user.avatar
@@ -139,6 +145,7 @@ function renderAuthArea() {
   }
 }
 
+let lastUnread = 0;
 async function refreshUnread() {
   if (!session.isAuthed) return;
   try {
@@ -146,7 +153,25 @@ async function refreshUnread() {
     const badge = document.getElementById('navUnread');
     const tabBadge = document.getElementById('tabUnread');
     [badge, tabBadge].forEach((b) => { if (b) { b.hidden = !unread; b.textContent = unread > 9 ? '9+' : unread; } });
+    // Локальне сповіщення, якщо непрочитаних побільшало і вкладка не активна.
+    if (unread > lastUnread && document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+      try {
+        const n = new Notification(t('notif.title'), {
+          body: t('app.tagline'), icon: '/icons/icon-192.png', tag: 'ouk-msg', renotify: true,
+        });
+        n.onclick = () => { window.focus(); location.hash = '#/chats'; n.close(); };
+      } catch { /* ignore */ }
+    }
+    lastUnread = unread;
   } catch { /* ignore */ }
+}
+
+// Запитуємо дозвіл на сповіщення (одноразово після входу).
+function maybeRequestNotifications() {
+  if (!session.isAuthed || !('Notification' in window)) return;
+  if (Notification.permission === 'default') {
+    Notification.requestPermission().catch(() => {});
+  }
 }
 
 window.addEventListener('auth-changed', renderAuthArea);
@@ -172,6 +197,6 @@ document.getElementById('searchForm').addEventListener('submit', (e) => {
 applyStaticText();
 renderAuthArea();
 render();
-bootstrapSession().then(() => { renderAuthArea(); });
+bootstrapSession().then(() => { renderAuthArea(); maybeRequestNotifications(); });
 // Періодично оновлюємо лічильник непрочитаних.
 setInterval(refreshUnread, 20000);

@@ -254,13 +254,27 @@ function currentUser(req, url) {
   return DB.users.find((u) => u.id === s.userId) || null;
 }
 
+// Адміни визначаються змінною оточення ADMIN_EMAILS (через кому).
+// Якщо її немає — адміном стає найперший зареєстрований користувач (зручно для self-host).
+const ADMIN_EMAILS = new Set(
+  String(process.env.ADMIN_EMAILS || '')
+    .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+);
+
+function isAdmin(user) {
+  if (!user) return false;
+  if (user.isAdmin) return true;
+  if (ADMIN_EMAILS.size) return ADMIN_EMAILS.has((user.email || '').toLowerCase());
+  return false;
+}
+
 function publicUser(u) {
   if (!u) return null;
   return { id: u.id, name: u.name, city: u.city || '', avatar: u.avatar || '', createdAt: u.createdAt };
 }
 function selfUser(u) {
   if (!u) return null;
-  return { ...publicUser(u), email: u.email, phone: u.phone || '' };
+  return { ...publicUser(u), email: u.email, phone: u.phone || '', isAdmin: isAdmin(u) };
 }
 
 async function registerUser(body) {
@@ -277,6 +291,8 @@ async function registerUser(body) {
     id: uid(12), name, email, salt, hash,
     phone: sanitizePhone(body.phone), city: clampStr(body.city, 60),
     avatar: '', createdAt: new Date().toISOString(),
+    // Перший користувач стає адміном, якщо не задано ADMIN_EMAILS.
+    isAdmin: !ADMIN_EMAILS.size && DB.users.length === 0,
   };
   DB.users.push(user);
   const token = issueSession(user.id);
@@ -359,6 +375,7 @@ function validateListing(b) {
 
 // Чи має право користувач/токен керувати оголошенням.
 function canManage(listing, user, body, url) {
+  if (isAdmin(user)) return true; // адмін може все
   if (user && listing.userId && listing.userId === user.id) return true;
   const tok = (body && body.editToken) || (url && url.searchParams.get('token'));
   if (tok && listing.editTokenHash && sha256(tok) === listing.editTokenHash) return true;
@@ -602,6 +619,61 @@ async function createReport(body) {
 }
 
 /* ----------------------------------------------------------------------------
+ * Адмін / модерація
+ * ------------------------------------------------------------------------- */
+
+function adminStats() {
+  const now = Date.now();
+  const dayAgo = now - 1000 * 60 * 60 * 24;
+  const newToday = DB.listings.filter((l) => new Date(l.createdAt).getTime() > dayAgo).length;
+  return {
+    listings: DB.listings.length,
+    active: DB.listings.filter((l) => l.status === 'active').length,
+    sold: DB.listings.filter((l) => l.status === 'sold').length,
+    users: DB.users.length,
+    messages: DB.messages.length,
+    reportsOpen: DB.reports.filter((r) => !r.resolved).length,
+    reportsTotal: DB.reports.length,
+    newListingsToday: newToday,
+  };
+}
+
+// Список скарг із прикріпленим оголошенням (для адмінки).
+function adminReports(params) {
+  const showResolved = params.get('resolved') === '1';
+  const reports = DB.reports
+    .filter((r) => showResolved || !r.resolved)
+    .sort((a, b) => (b.createdAt > a.createdAt ? 1 : -1))
+    .map((r) => {
+      const listing = DB.listings.find((x) => x.id === r.listingId);
+      return { ...r, listing: listing ? publicListing(listing) : null };
+    });
+  return { status: 200, body: { reports } };
+}
+
+async function resolveReport(id, body) {
+  const r = DB.reports.find((x) => x.id === id);
+  if (!r) return { status: 404, body: { error: 'Скаргу не знайдено.' } };
+  r.resolved = body.resolved !== false;
+  r.resolvedAt = new Date().toISOString();
+  await saveDB();
+  return { status: 200, body: { ok: true, report: r } };
+}
+
+// Адмін видаляє оголошення + закриває пов'язані скарги.
+async function adminDeleteListing(id) {
+  const idx = DB.listings.findIndex((x) => x.id === id);
+  if (idx === -1) return { status: 404, body: { error: 'Оголошення не знайдено.' } };
+  await removeImageFiles(DB.listings[idx].images);
+  DB.listings.splice(idx, 1);
+  for (const r of DB.reports) {
+    if (r.listingId === id && !r.resolved) { r.resolved = true; r.resolvedAt = new Date().toISOString(); }
+  }
+  await saveDB();
+  return { status: 200, body: { ok: true } };
+}
+
+/* ----------------------------------------------------------------------------
  * Статика
  * ------------------------------------------------------------------------- */
 
@@ -742,6 +814,28 @@ async function handleApi(req, res, url) {
     if (resource === 'reports' && req.method === 'POST') {
       const r = await createReport(await readBody(req));
       return send(res, r.status, r.body);
+    }
+
+    /* ---- Адмін / модерація ---- */
+    if (resource === 'admin') {
+      if (!isAdmin(user)) return send(res, 403, { error: 'Доступ лише для адміністратора.' });
+      const sub = parts[2];
+
+      if (req.method === 'GET' && sub === 'stats') {
+        return send(res, 200, adminStats());
+      }
+      if (req.method === 'GET' && sub === 'reports') {
+        const r = adminReports(url.searchParams);
+        return send(res, r.status, r.body);
+      }
+      if (req.method === 'POST' && sub === 'reports' && parts[3]) {
+        const r = await resolveReport(parts[3], await readBody(req));
+        return send(res, r.status, r.body);
+      }
+      if (req.method === 'DELETE' && sub === 'listings' && parts[3]) {
+        const r = await adminDeleteListing(parts[3]);
+        return send(res, r.status, r.body);
+      }
     }
 
     return send(res, 404, { error: 'Невідомий маршрут API.' });

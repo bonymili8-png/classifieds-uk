@@ -61,6 +61,12 @@ export const api = {
 
   // -- Скарги --
   report(listingId, reason, text) { return request('/api/reports', { method: 'POST', body: JSON.stringify({ listingId, reason, text }) }); },
+
+  // -- Адмін --
+  adminStats() { return request('/api/admin/stats'); },
+  adminReports(resolved = false) { return request('/api/admin/reports' + (resolved ? '?resolved=1' : '')); },
+  adminResolveReport(id, resolved = true) { return request('/api/admin/reports/' + encodeURIComponent(id), { method: 'POST', body: JSON.stringify({ resolved }) }); },
+  adminDeleteListing(id) { return request('/api/admin/listings/' + encodeURIComponent(id), { method: 'DELETE' }); },
 };
 
 // Підвантажити поточного користувача за збереженим токеном.
