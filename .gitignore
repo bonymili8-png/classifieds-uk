@@ -3,6 +3,12 @@ npm-debug.log*
 .DS_Store
 *.log
 
+# E2E (Playwright) — артефакти
+e2e/node_modules/
+e2e/test-results/
+e2e/playwright-report/
+e2e/package-lock.json
+
 # Runtime data (uploaded photos + database). Seed file is tracked.
 public/uploads/*
 !public/uploads/.gitkeep

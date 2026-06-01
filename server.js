@@ -16,6 +16,10 @@ import fssync from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import {
+  sendMail, mailEnabled,
+  passwordResetEmail, welcomeEmail, newMessageEmail,
+} from './mailer.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -346,6 +350,9 @@ async function registerUser(body) {
   DB.users.push(user);
   const token = issueSession(user.id);
   await saveDB();
+  // Вітальний лист (необов'язковий — лише якщо налаштовано SMTP).
+  const w = welcomeEmail(user.name);
+  sendMail({ to: user.email, subject: w.subject, text: w.text, html: w.html });
   return { status: 201, body: { token, user: selfUser(user) } };
 }
 
@@ -627,6 +634,27 @@ function threadIdFor(listingId, userA, userB) {
   return sha256(listingId + ':' + pair).slice(0, 16);
 }
 
+// Email-сповіщення про нове повідомлення — з антиспам-логікою:
+// надсилаємо лише якщо у одержувача в цьому діалозі не було інших непрочитаних
+// (окрім щойно створеного). Тобто серія повідомлень = один лист, поки не прочитають.
+function notifyNewMessage(newMsg) {
+  if (!mailEnabled) return;
+  const priorUnread = DB.messages.some((m) =>
+    m.threadId === newMsg.threadId && m.id !== newMsg.id &&
+    m.toUserId === newMsg.toUserId && !m.readBy.includes(newMsg.toUserId));
+  if (priorUnread) return; // лист уже надсилався, користувач ще не прочитав
+
+  const to = DB.users.find((u) => u.id === newMsg.toUserId);
+  const from = DB.users.find((u) => u.id === newMsg.fromUserId);
+  const listing = DB.listings.find((x) => x.id === newMsg.listingId);
+  if (!to || !from) return;
+  const tpl = newMessageEmail({
+    toName: to.name, fromName: from.name,
+    listingTitle: listing ? listing.title : '—', threadId: newMsg.threadId,
+  });
+  sendMail({ to: to.email, subject: tpl.subject, text: tpl.text, html: tpl.html });
+}
+
 async function sendMessage(body, user) {
   if (!user) return { status: 401, body: { error: 'Увійдіть, щоб писати повідомлення.' } };
   const listing = DB.listings.find((x) => x.id === body.listingId);
@@ -645,6 +673,7 @@ async function sendMessage(body, user) {
   };
   DB.messages.push(msg);
   await saveDB();
+  notifyNewMessage(msg);
   return { status: 201, body: { message: msg } };
 }
 
@@ -714,6 +743,7 @@ async function replyThread(threadId, body, user) {
   };
   DB.messages.push(msg);
   await saveDB();
+  notifyNewMessage(msg);
   return { status: 201, body: { message: msg } };
 }
 
@@ -812,10 +842,13 @@ async function requestPasswordReset(body) {
   DB.resets[token] = { userId: user.id, expiresAt: now + RESET_TTL };
   await saveDB();
 
-  // У реальному застосунку токен надсилається листом. Тут — лог + повертаємо
-  // resetToken ЛИШЕ якщо EXPOSE_RESET_TOKEN=1 (для self-host/демо/тестів).
-  console.log(`[reset] токен для ${email}: ${token}`);
+  // Надсилаємо лист зі скиданням (асинхронно, не блокуючи відповідь).
+  const tpl = passwordResetEmail(token);
+  sendMail({ to: user.email, subject: tpl.subject, text: tpl.text, html: tpl.html });
+  if (!mailEnabled) console.log(`[reset] токен для ${email}: ${token}`);
+
   const out = { ...generic };
+  // resetToken у відповіді — лише в демо-режимі без пошти (EXPOSE_RESET_TOKEN=1).
   if (process.env.EXPOSE_RESET_TOKEN === '1') out.resetToken = token;
   return { status: 200, body: out };
 }
@@ -1001,7 +1034,7 @@ async function handleApi(req, res, url) {
 
   try {
     if (resource === 'health') {
-      return send(res, 200, { ok: true, listings: DB.listings.length, users: DB.users.length, time: new Date().toISOString() });
+      return send(res, 200, { ok: true, listings: DB.listings.length, users: DB.users.length, mail: mailEnabled, time: new Date().toISOString() });
     }
 
     // Схема додаткових характеристик за категоріями (джерело істини на сервері).
