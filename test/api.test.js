@@ -34,7 +34,12 @@ before(async () => {
 
   child = spawn(process.execPath, ['server.js'], {
     cwd: ROOT,
-    env: { ...process.env, PORT: String(PORT), HOST: '127.0.0.1', ADMIN_EMAILS: 'admin@test.dev', EXPOSE_RESET_TOKEN: '1' },
+    env: {
+      ...process.env, PORT: String(PORT), HOST: '127.0.0.1',
+      ADMIN_EMAILS: 'admin@test.dev', EXPOSE_RESET_TOKEN: '1',
+      // Вимикаємо rate-limit, щоб численні тестові логіни не впиралися в ліміт.
+      DISABLE_RATE_LIMIT: '1',
+    },
     stdio: 'ignore',
   });
 
@@ -435,4 +440,75 @@ test('статика віддається з правильними типами
 test('path traversal заблоковано', async () => {
   const r = await fetch(BASE + '/../server.js');
   assert.ok(r.status === 403 || r.status === 404);
+});
+
+/* ============================ Безпека / SEO / бекап ============================ */
+
+test('заголовки безпеки присутні', async () => {
+  const r = await fetch(BASE + '/');
+  assert.equal(r.headers.get('x-content-type-options'), 'nosniff');
+  assert.equal(r.headers.get('x-frame-options'), 'SAMEORIGIN');
+  assert.ok(r.headers.get('content-security-policy').includes("default-src 'self'"));
+});
+
+test('robots.txt містить посилання на sitemap', async () => {
+  const r = await fetch(BASE + '/robots.txt');
+  assert.equal(r.status, 200);
+  const text = await r.text();
+  assert.ok(text.includes('Sitemap:'));
+  assert.ok(text.includes('/sitemap.xml'));
+});
+
+test('sitemap.xml — валідний XML з оголошеннями', async () => {
+  const r = await fetch(BASE + '/sitemap.xml');
+  assert.equal(r.status, 200);
+  assert.ok(r.headers.get('content-type').includes('xml'));
+  const xml = await r.text();
+  assert.ok(xml.startsWith('<?xml'));
+  assert.ok(xml.includes('<urlset'));
+  assert.ok(xml.includes('/#/l/'), 'містить посилання на оголошення');
+});
+
+test('бекап доступний лише адміну і не містить секретів', async () => {
+  const denied = await req('GET', '/api/admin/backup', { token: tokenA });
+  assert.equal(denied.status, 403);
+
+  const ok = await req('GET', '/api/admin/backup', { token: adminToken });
+  assert.equal(ok.status, 200);
+  assert.ok(Array.isArray(ok.json.listings));
+  assert.ok(Array.isArray(ok.json.users));
+  // Жодних паролів/солей/токенів.
+  const dump = JSON.stringify(ok.json);
+  assert.ok(!dump.includes('"salt"'), 'без солі');
+  assert.ok(!dump.includes('"hash"'), 'без хешу пароля');
+  assert.ok(!dump.includes('editTokenHash'), 'без токенів редагування');
+});
+
+test('rate-limit повертає 429 при перевищенні (ізольований сервер)', async () => {
+  // Піднімаємо окремий екземпляр БЕЗ DISABLE_RATE_LIMIT.
+  const p2 = 4600 + Math.floor(Math.random() * 300);
+  const c2 = spawn(process.execPath, ['server.js'], {
+    cwd: ROOT,
+    env: { ...process.env, PORT: String(p2), HOST: '127.0.0.1', DISABLE_RATE_LIMIT: '0' },
+    stdio: 'ignore',
+  });
+  try {
+    const base2 = `http://127.0.0.1:${p2}`;
+    for (let i = 0; i < 60; i++) {
+      try { if ((await fetch(base2 + '/api/health')).ok) break; } catch { /* wait */ }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    // Ліміт логіну — 10 за 5 хв. 12 спроб → останні мають дати 429.
+    let got429 = false;
+    for (let i = 0; i < 12; i++) {
+      const r = await fetch(base2 + '/api/auth/login', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'x@x.dev', password: 'nope' }),
+      });
+      if (r.status === 429) { got429 = true; break; }
+    }
+    assert.ok(got429, 'після кількох спроб має спрацювати 429');
+  } finally {
+    c2.kill('SIGKILL');
+  }
 });

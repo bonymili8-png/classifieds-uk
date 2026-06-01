@@ -1,0 +1,15 @@
+.git
+node_modules
+npm-debug.log*
+*.log
+.DS_Store
+.github
+test
+data/db.runtime.json
+data/listings.runtime.json
+public/uploads/*
+!public/uploads/.gitkeep
+public/icons/icon-192.png
+public/icons/icon-512.png
+.env
+.env.local

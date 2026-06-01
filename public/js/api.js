@@ -73,6 +73,7 @@ export const api = {
   adminReports(resolved = false) { return request('/api/admin/reports' + (resolved ? '?resolved=1' : '')); },
   adminResolveReport(id, resolved = true) { return request('/api/admin/reports/' + encodeURIComponent(id), { method: 'POST', body: JSON.stringify({ resolved }) }); },
   adminDeleteListing(id) { return request('/api/admin/listings/' + encodeURIComponent(id), { method: 'DELETE' }); },
+  adminBackupUrl() { return '/api/admin/backup' + (session.token ? '?token=' + encodeURIComponent(session.token) : ''); },
 };
 
 // Підвантажити поточного користувача за збереженим токеном.

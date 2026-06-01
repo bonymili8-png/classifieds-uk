@@ -205,3 +205,8 @@ render();
 bootstrapSession().then(() => { renderAuthArea(); maybeRequestNotifications(); });
 // Періодично оновлюємо лічильник непрочитаних.
 setInterval(refreshUnread, 20000);
+
+// Реєстрація service worker (винесено з inline-скрипта заради CSP).
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('/service-worker.js').catch(() => {}));
+}

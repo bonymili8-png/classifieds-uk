@@ -960,7 +960,8 @@ export const AdminView = {
   async render() {
     if (!session.isAuthed || !session.user.isAdmin) { location.hash = '#/'; return ''; }
     return `<div class="container">
-      <div class="section-head"><h2>🛡️ ${esc(t('admin.title'))}</h2></div>
+      <div class="section-head"><h2>🛡️ ${esc(t('admin.title'))}</h2>
+        <a class="btn btn-sm" href="${api.adminBackupUrl()}" download>${esc(t('admin.backup'))}</a></div>
       <div class="admin-stats" id="adminStats">${gridSkeleton(4)}</div>
       <div class="section-head" style="margin-top:26px">
         <h2>${esc(t('admin.reports'))}</h2>

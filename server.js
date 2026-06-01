@@ -31,6 +31,40 @@ const DB_FILE = path.join(DATA_DIR, 'db.runtime.json');
 const MAX_BODY = 20 * 1024 * 1024; // 20 МБ — вистачає на кілька стиснених фото
 const SESSION_TTL = 1000 * 60 * 60 * 24 * 30; // 30 днів
 
+// Публічна адреса (для канонічних URL у sitemap.xml). Можна задати через SITE_URL.
+const SITE_URL = (process.env.SITE_URL || '').replace(/\/+$/, '');
+
+/* ----------------------------------------------------------------------------
+ * Обмеження частоти запитів (rate limiting) — у пам'яті, ковзне вікно.
+ * Захищає від брутфорсу логіну/реєстрації та спаму записами.
+ * ------------------------------------------------------------------------- */
+const RATE_BUCKETS = new Map(); // key -> [timestamps]
+const RATE_DISABLED = process.env.DISABLE_RATE_LIMIT === '1'; // зручно для тестів
+
+function rateLimit(key, limit, windowMs) {
+  if (RATE_DISABLED) return true;
+  const now = Date.now();
+  const arr = (RATE_BUCKETS.get(key) || []).filter((t) => now - t < windowMs);
+  if (arr.length >= limit) { RATE_BUCKETS.set(key, arr); return false; }
+  arr.push(now);
+  RATE_BUCKETS.set(key, arr);
+  return true;
+}
+
+function clientIp(req) {
+  const xff = req.headers['x-forwarded-for'];
+  if (xff) return String(xff).split(',')[0].trim();
+  return req.socket.remoteAddress || 'unknown';
+}
+
+// Періодичне прибирання порожніх кошиків, щоб мапа не росла безмежно.
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, arr] of RATE_BUCKETS) {
+    if (!arr.some((t) => now - t < 60 * 60 * 1000)) RATE_BUCKETS.delete(k);
+  }
+}, 10 * 60 * 1000).unref?.();
+
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -790,6 +824,61 @@ async function adminDeleteListing(id) {
   return { status: 200, body: { ok: true } };
 }
 
+// Експорт бази для бекапу. Прибираємо секрети (паролі, сесії, токени скидання,
+// хеші редагування). Лишаємо контент і метадані, придатні для відновлення.
+function adminBackup() {
+  return {
+    exportedAt: new Date().toISOString(),
+    listings: DB.listings.map(({ editTokenHash, ...rest }) => rest),
+    users: DB.users.map((u) => ({
+      id: u.id, name: u.name, email: u.email, phone: u.phone || '',
+      city: u.city || '', avatar: u.avatar || '', createdAt: u.createdAt, isAdmin: !!u.isAdmin,
+    })),
+    messages: DB.messages,
+    reviews: DB.reviews,
+    reports: DB.reports,
+  };
+}
+
+/* ----------------------------------------------------------------------------
+ * SEO: robots.txt та sitemap.xml
+ * ------------------------------------------------------------------------- */
+
+function baseUrl(req) {
+  if (SITE_URL) return SITE_URL;
+  const proto = (req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim();
+  return `${proto}://${req.headers.host || 'localhost'}`;
+}
+
+function serveRobots(req, res, url) {
+  const body = `User-agent: *\nAllow: /\nSitemap: ${baseUrl(req)}/sitemap.xml\n`;
+  res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'public, max-age=3600' });
+  res.end(body);
+}
+
+function serveSitemap(req, res, url) {
+  const base = baseUrl(req);
+  const xmlEscape = (s) => String(s).replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[c]));
+  const urls = [
+    { loc: `${base}/`, priority: '1.0' },
+    { loc: `${base}/#/search`, priority: '0.8' },
+  ];
+  // Активні оголошення — як хеш-маршрути.
+  for (const l of DB.listings) {
+    if (l.status !== 'active') continue;
+    urls.push({ loc: `${base}/#/l/${l.id}`, lastmod: (l.updatedAt || l.createdAt).slice(0, 10), priority: '0.6' });
+  }
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n` +
+    `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
+    urls.map((u) => `  <url><loc>${xmlEscape(u.loc)}</loc>` +
+      (u.lastmod ? `<lastmod>${u.lastmod}</lastmod>` : '') +
+      `<priority>${u.priority}</priority></url>`).join('\n') +
+    `\n</urlset>\n`;
+  res.writeHead(200, { 'Content-Type': 'application/xml; charset=utf-8', 'Cache-Control': 'public, max-age=3600' });
+  res.end(xml);
+}
+
 /* ----------------------------------------------------------------------------
  * Статика
  * ------------------------------------------------------------------------- */
@@ -844,6 +933,13 @@ async function handleApi(req, res, url) {
     /* ---- Авторизація ---- */
     if (resource === 'auth') {
       const action = parts[2];
+      const ip = clientIp(req);
+      // Жорсткий ліміт на чутливі дії: 10 спроб за 5 хв з однієї адреси.
+      if (req.method === 'POST' && ['register', 'login', 'forgot', 'reset'].includes(action)) {
+        if (!rateLimit(`auth:${action}:${ip}`, 10, 5 * 60 * 1000)) {
+          return send(res, 429, { error: 'Забагато спроб. Зачекайте кілька хвилин.' });
+        }
+      }
       if (req.method === 'POST' && action === 'register') {
         const r = await registerUser(await readBody(req));
         return send(res, r.status, r.body);
@@ -912,6 +1008,10 @@ async function handleApi(req, res, url) {
         return send(res, 200, { listing: publicListing(l) });
       }
       if (req.method === 'POST' && !id) {
+        // Анти-спам: не більше 20 нових оголошень за годину з адреси.
+        if (!rateLimit('newlisting:' + clientIp(req), 20, 60 * 60 * 1000)) {
+          return send(res, 429, { error: 'Забагато оголошень за короткий час. Спробуйте пізніше.' });
+        }
         const r = await createListing(await readBody(req), user);
         return send(res, r.status, r.body);
       }
@@ -937,6 +1037,9 @@ async function handleApi(req, res, url) {
         return send(res, r.status, r.body);
       }
       if (req.method === 'POST' && !sub) {
+        if (user && !rateLimit('newchat:' + user.id, 30, 60 * 60 * 1000)) {
+          return send(res, 429, { error: 'Забагато нових діалогів. Спробуйте пізніше.' });
+        }
         const r = await sendMessage(await readBody(req), user);
         return send(res, r.status, r.body);
       }
@@ -976,6 +1079,13 @@ async function handleApi(req, res, url) {
         const r = await adminDeleteListing(parts[3]);
         return send(res, r.status, r.body);
       }
+      // Бекап усієї бази (без паролів/токенів) — для збереження адміном.
+      if (req.method === 'GET' && sub === 'backup') {
+        const dump = adminBackup();
+        return send(res, 200, dump, {
+          'Content-Disposition': `attachment; filename="ouk-backup-${new Date().toISOString().slice(0, 10)}.json"`,
+        });
+      }
     }
 
     return send(res, 404, { error: 'Невідомий маршрут API.' });
@@ -990,18 +1100,47 @@ async function handleApi(req, res, url) {
  * Сервер
  * ------------------------------------------------------------------------- */
 
+// Заголовки безпеки для всіх відповідей.
+function securityHeaders(res) {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
+  // CSP: дозволяємо лише власні ресурси + data:/blob: для зображень (фото як data-URL),
+  // та зовнішні переходи на tel:/wa.me/t.me відкриваються браузером поза CSP.
+  res.setHeader('Content-Security-Policy', [
+    "default-src 'self'",
+    "img-src 'self' data: blob:",
+    "style-src 'self' 'unsafe-inline'",
+    "script-src 'self'",
+    "connect-src 'self'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'self'",
+  ].join('; '));
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+  securityHeaders(res);
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
     return res.end();
   }
 
+  // robots.txt та sitemap.xml — для пошукових систем.
+  if (url.pathname === '/robots.txt') return serveRobots(req, res, url);
+  if (url.pathname === '/sitemap.xml') return serveSitemap(req, res, url);
+
   if (url.pathname.startsWith('/api/')) {
+    // Базовий ліміт на всі API-запити з однієї адреси.
+    if (!rateLimit('api:' + clientIp(req), 600, 60 * 1000)) {
+      return send(res, 429, { error: 'Забагато запитів. Спробуйте за хвилину.' });
+    }
     return handleApi(req, res, url);
   }
   return serveStatic(req, res, url.pathname);
