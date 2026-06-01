@@ -38,6 +38,11 @@ export const api = {
     return request('/api/listings?' + q.toString());
   },
   get(id) { return request('/api/listings/' + encodeURIComponent(id)); },
+  _attrCache: null,
+  async attributesSchema() {
+    if (!this._attrCache) { const { attributes } = await request('/api/meta/attributes'); this._attrCache = attributes; }
+    return this._attrCache;
+  },
   create(payload) { return request('/api/listings', { method: 'POST', body: JSON.stringify(payload) }); },
   update(id, payload) { return request('/api/listings/' + encodeURIComponent(id), { method: 'PUT', body: JSON.stringify(payload) }); },
   setStatus(id, status, editToken) { return request('/api/listings/' + encodeURIComponent(id), { method: 'PUT', body: JSON.stringify({ action: 'status', status, editToken }) }); },

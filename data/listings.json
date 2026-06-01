@@ -13,6 +13,7 @@
       "whatsapp": "+447700900111",
       "telegram": "",
       "images": [],
+      "attributes": { "rooms": "1", "furnished": "furnished", "billsIncluded": true, "period": "monthly" },
       "createdAt": "2026-05-28T09:10:00.000Z",
       "updatedAt": "2026-05-28T09:10:00.000Z",
       "views": 142
@@ -30,6 +31,7 @@
       "whatsapp": "+447700900222",
       "telegram": "robota_uk",
       "images": [],
+      "attributes": { "employment": "fulltime", "schedule": "shift", "payPeriod": "hour", "remote": false },
       "createdAt": "2026-05-29T07:30:00.000Z",
       "updatedAt": "2026-05-29T07:30:00.000Z",
       "views": 310

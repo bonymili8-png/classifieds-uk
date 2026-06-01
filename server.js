@@ -383,6 +383,72 @@ async function updateProfile(user, body) {
  * Оголошення
  * ------------------------------------------------------------------------- */
 
+// Додаткові характеристики за категоріями. Тип: select | number | text | bool.
+// Клієнт рендерить ті самі поля (public/js/attributes.js тримає підписи/мовність).
+const CATEGORY_ATTRS = {
+  housing: [
+    { key: 'rooms', type: 'select', options: ['studio', '1', '2', '3', '4+'] },
+    { key: 'furnished', type: 'select', options: ['furnished', 'unfurnished', 'partly'] },
+    { key: 'billsIncluded', type: 'bool' },
+    { key: 'period', type: 'select', options: ['monthly', 'weekly', 'daily'] },
+  ],
+  jobs: [
+    { key: 'employment', type: 'select', options: ['fulltime', 'parttime', 'temporary', 'oneoff'] },
+    { key: 'schedule', type: 'select', options: ['day', 'night', 'shift', 'flexible'] },
+    { key: 'payPeriod', type: 'select', options: ['hour', 'day', 'week', 'month'] },
+    { key: 'remote', type: 'bool' },
+  ],
+  transport: [
+    { key: 'make', type: 'text', max: 40 },
+    { key: 'year', type: 'number', min: 1950, max: 2030 },
+    { key: 'mileage', type: 'number', min: 0, max: 2000000 },
+    { key: 'fuel', type: 'select', options: ['petrol', 'diesel', 'hybrid', 'electric', 'other'] },
+  ],
+  electronics: [
+    { key: 'condition', type: 'select', options: ['new', 'likenew', 'good', 'used', 'parts'] },
+    { key: 'warranty', type: 'bool' },
+  ],
+  furniture: [
+    { key: 'condition', type: 'select', options: ['new', 'likenew', 'good', 'used'] },
+    { key: 'delivery', type: 'bool' },
+  ],
+  kids: [
+    { key: 'condition', type: 'select', options: ['new', 'likenew', 'good', 'used'] },
+  ],
+  goods: [
+    { key: 'condition', type: 'select', options: ['new', 'likenew', 'good', 'used', 'parts'] },
+  ],
+};
+
+// Дозволені значення select-полів — для серверної валідації.
+const ATTR_OPTION_SET = {};
+for (const [cat, defs] of Object.entries(CATEGORY_ATTRS)) {
+  ATTR_OPTION_SET[cat] = {};
+  for (const d of defs) if (d.type === 'select') ATTR_OPTION_SET[cat][d.key] = new Set(d.options);
+}
+
+// Очищає атрибути відповідно до схеми категорії. Невідомі ключі відкидаються.
+function sanitizeAttributes(category, raw) {
+  const defs = CATEGORY_ATTRS[category];
+  if (!defs || raw == null || typeof raw !== 'object') return {};
+  const out = {};
+  for (const d of defs) {
+    const v = raw[d.key];
+    if (v == null || v === '') continue;
+    if (d.type === 'bool') { if (v === true || v === 'true' || v === 1) out[d.key] = true; }
+    else if (d.type === 'number') {
+      const n = Number(v);
+      if (Number.isFinite(n) && (d.min == null || n >= d.min) && (d.max == null || n <= d.max)) out[d.key] = n;
+    } else if (d.type === 'select') {
+      if (ATTR_OPTION_SET[category][d.key].has(String(v))) out[d.key] = String(v);
+    } else { // text
+      const s = clampStr(v, d.max || 60);
+      if (s) out[d.key] = s;
+    }
+  }
+  return out;
+}
+
 function publicListing(l) {
   const { editTokenHash, ...rest } = l;
   const owner = l.userId ? DB.users.find((u) => u.id === l.userId) : null;
@@ -418,6 +484,7 @@ function validateListing(b) {
       isFree: !!b.isFree,
       whatsapp: b.whatsapp === false ? '' : sanitizePhone(b.whatsapp || (b.whatsappSame ? phone : '')),
       telegram: sanitizeTelegram(b.telegram),
+      attributes: sanitizeAttributes(category, b.attributes),
     },
   };
 }
@@ -527,6 +594,13 @@ function queryListings(params, user) {
   if (withPhoto === '1') items = items.filter((l) => l.images && l.images.length);
   if (min) items = items.filter((l) => (l.price ?? Infinity) >= Number(min));
   if (max) items = items.filter((l) => (l.price ?? 0) <= Number(max));
+
+  // Фільтри за характеристиками: ?attr_rooms=2&attr_furnished=furnished
+  for (const [k, v] of params) {
+    if (!k.startsWith('attr_') || v === '') continue;
+    const key = k.slice(5);
+    items = items.filter((l) => l.attributes && String(l.attributes[key]) === String(v));
+  }
 
   switch (sort) {
     case 'cheap': items.sort((a, b) => (a.price ?? Infinity) - (b.price ?? Infinity)); break;
@@ -928,6 +1002,11 @@ async function handleApi(req, res, url) {
   try {
     if (resource === 'health') {
       return send(res, 200, { ok: true, listings: DB.listings.length, users: DB.users.length, time: new Date().toISOString() });
+    }
+
+    // Схема додаткових характеристик за категоріями (джерело істини на сервері).
+    if (resource === 'meta' && parts[2] === 'attributes') {
+      return send(res, 200, { attributes: CATEGORY_ATTRS }, { 'Cache-Control': 'public, max-age=3600' });
     }
 
     /* ---- Авторизація ---- */

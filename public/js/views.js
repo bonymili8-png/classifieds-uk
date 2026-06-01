@@ -3,6 +3,7 @@
 import { api, store, session } from './api.js';
 import { CATEGORIES, CITIES, sorts, catLabel, formatPrice, timeAgo, esc } from './data.js';
 import { t } from './i18n.js';
+import { attrFieldLabel, attrValueLabel, attrSummary } from './attributes.js';
 
 /* ============================ Дрібні частини ============================ */
 
@@ -15,6 +16,7 @@ export function cardHTML(l) {
   const fav = store.isFav(l.id);
   const hasPhoto = l.images && l.images.length;
   const sold = l.status === 'sold';
+  const chips = attrSummary(l.category, l.attributes).slice(0, 3);
   return `
   <article class="card ${sold ? 'is-sold' : ''}">
     ${sold ? `<span class="sold-badge">${esc(t('detail.sold'))}</span>` : ''}
@@ -25,6 +27,7 @@ export function cardHTML(l) {
     <a href="#/l/${l.id}" data-link style="display:flex;flex-direction:column;flex:1">
       <h3 class="card-title">${esc(l.title)}</h3>
       <p class="card-desc">${esc(l.description)}</p>
+      ${chips.length ? `<div class="card-chips">${chips.map((c) => `<span class="card-chip">${esc(c)}</span>`).join('')}</div>` : ''}
       <div class="card-foot">
         <span class="price ${l.isFree || l.price === 0 ? 'free' : ''}">${formatPrice(l)}</span>
         <span class="card-loc">${pinSvg}<span>${esc(l.location)}</span></span>
@@ -72,6 +75,16 @@ function starsHTML(avg, { interactive = false } = {}) {
 function ratingBadgeHTML(rating) {
   if (!rating || !rating.count) return `<span class="rating-badge muted">${starsHTML(0)} <small>${esc(t('rev.noRating'))}</small></span>`;
   return `<span class="rating-badge">${starsHTML(rating.avg)} <b>${rating.avg}</b> <small>(${t('rev.count', { n: rating.count })})</small></span>`;
+}
+
+// Таблиця характеристик на сторінці оголошення.
+function attrsTable(attributes) {
+  const entries = Object.entries(attributes || {}).filter(([, v]) => v !== '' && v != null && v !== false);
+  if (!entries.length) return '';
+  return `<div class="detail-card mt24"><h2 class="dc-title">${esc(t('attr.section'))}</h2>
+    <dl class="attr-table">${entries.map(([k, v]) => `
+      <div class="attr-row"><dt>${esc(attrFieldLabel(k))}</dt><dd>${v === true ? '✓' : esc(attrValueLabel(v))}</dd></div>`).join('')}
+    </dl></div>`;
 }
 
 /* ============================ Головна ============================ */
@@ -319,6 +332,7 @@ export const DetailView = {
       </div>
 
       <div class="container" style="padding:0;max-width:980px">
+        ${attrsTable(l.attributes)}
         <div class="detail-card mt24"><h2 class="dc-title">${esc(t('detail.description'))}</h2>
           <div class="desc">${esc(l.description)}</div></div>
       </div>`;
@@ -425,6 +439,10 @@ export const FormView = {
               <div class="field"><label class="lbl">${esc(t('form.telegram'))}</label>
                 <input class="input" id="telegram" maxlength="40" placeholder="username"></div>
             </div>
+            <div id="attrSection" hidden>
+              <h3 class="attr-heading">${esc(t('attr.section'))}</h3>
+              <div class="form-grid two" id="attrFields"></div>
+            </div>
             <div class="field">
               <div class="help-row"><label class="lbl">${esc(t('form.description'))} <span class="req">*</span></label><span class="counter"><span id="cDesc">0</span>/1200</span></div>
               <textarea class="textarea" id="description" maxlength="1200" placeholder="${esc(t('form.descPlaceholder'))}" required></textarea>
@@ -459,6 +477,56 @@ export const FormView = {
 
     $('#waSame').addEventListener('change', (e) => { $('#waWrap').style.display = e.target.checked ? 'none' : ''; });
     $('#isFree').addEventListener('change', (e) => { $('#price').disabled = e.target.checked; if (e.target.checked) $('#price').value = ''; });
+
+    /* -------- Характеристики, що залежать від категорії -------- */
+    let attrSchema = {};
+    try { attrSchema = await api.attributesSchema(); } catch { attrSchema = {}; }
+    let pendingAttrs = {}; // значення для передзаповнення (редагування/чернетка)
+
+    function renderAttrFields() {
+      const cat = $('#category').value;
+      const defs = attrSchema[cat] || [];
+      const section = $('#attrSection');
+      const box = $('#attrFields');
+      if (!defs.length) { section.hidden = true; box.innerHTML = ''; return; }
+      section.hidden = false;
+      box.innerHTML = defs.map((d) => {
+        const id = 'attr_' + d.key;
+        const cur = pendingAttrs[d.key];
+        const label = esc(attrFieldLabel(d.key));
+        if (d.type === 'bool') {
+          return `<label class="switch attr-switch"><input type="checkbox" id="${id}" ${cur === true ? 'checked' : ''}><span class="track"></span><span>${label}</span></label>`;
+        }
+        if (d.type === 'select') {
+          return `<div class="field"><label class="lbl">${label}</label>
+            <select class="select" id="${id}"><option value="">${esc(t('attr.choose'))}</option>
+            ${d.options.map((o) => `<option value="${esc(o)}" ${String(cur) === o ? 'selected' : ''}>${esc(attrValueLabel(o))}</option>`).join('')}
+            </select></div>`;
+        }
+        if (d.type === 'number') {
+          return `<div class="field"><label class="lbl">${label}</label>
+            <input class="input" id="${id}" type="number" inputmode="numeric" ${d.min != null ? `min="${d.min}"` : ''} ${d.max != null ? `max="${d.max}"` : ''} value="${cur != null ? esc(cur) : ''}"></div>`;
+        }
+        return `<div class="field"><label class="lbl">${label}</label>
+          <input class="input" id="${id}" maxlength="${d.max || 60}" value="${cur != null ? esc(cur) : ''}"></div>`;
+      }).join('');
+    }
+
+    function collectAttributes() {
+      const cat = $('#category').value;
+      const defs = attrSchema[cat] || [];
+      const out = {};
+      for (const d of defs) {
+        const el = $('#attr_' + d.key);
+        if (!el) continue;
+        if (d.type === 'bool') { if (el.checked) out[d.key] = true; }
+        else if (el.value !== '') out[d.key] = d.type === 'number' ? Number(el.value) : el.value;
+      }
+      return out;
+    }
+
+    $('#category').addEventListener('change', () => { pendingAttrs = {}; renderAttrFields(); });
+    renderAttrFields();
 
     /* -------- Автозбереження чернетки (лише для нового оголошення) -------- */
     const DRAFT_KEY = 'ouk:draft';
@@ -558,6 +626,7 @@ export const FormView = {
         images = (l.images || []).slice();
         renderThumbs();
         $('#cTitle').textContent = l.title.length; $('#cDesc').textContent = l.description.length;
+        pendingAttrs = l.attributes || {}; renderAttrFields();
       } catch (e) { $('#formAlert').innerHTML = `<div class="alert alert-error">${esc(e.message)}</div>`; }
     }
 
@@ -571,6 +640,7 @@ export const FormView = {
         isFree: $('#isFree').checked, price: $('#isFree').checked ? '' : $('#price').value,
         whatsappSame: $('#waSame').checked,
         whatsapp: $('#waSame').checked ? $('#phone').value : $('#whatsapp').value,
+        attributes: collectAttributes(),
         images,
       };
       btn.disabled = true; btn.textContent = t('form.saving');

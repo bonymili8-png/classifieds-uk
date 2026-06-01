@@ -234,6 +234,67 @@ test('фільтр owner повертає всі статуси власника
   assert.ok(json.items.some((l) => l.id === listingId));
 });
 
+/* ============================ Характеристики (атрибути) ============================ */
+
+let housingId;
+
+test('схема характеристик доступна', async () => {
+  const { status, json } = await req('GET', '/api/meta/attributes');
+  assert.equal(status, 200);
+  assert.ok(json.attributes.housing, 'є housing');
+  assert.ok(json.attributes.transport.some((d) => d.key === 'year'));
+});
+
+test('створення оголошення з характеристиками; сміття відкидається', async () => {
+  const { status, json } = await req('POST', '/api/listings', {
+    token: tokenA,
+    body: {
+      title: 'Кімната в центрі Лідса', description: 'Світла кімната, поруч магазини.',
+      category: 'housing', location: 'Leeds, LS1', phone: '+447111000999', price: 600,
+      attributes: { rooms: '2', furnished: 'furnished', billsIncluded: true, period: 'monthly', hacker: 'x' },
+    },
+  });
+  assert.equal(status, 201);
+  assert.equal(json.listing.attributes.rooms, '2');
+  assert.equal(json.listing.attributes.furnished, 'furnished');
+  assert.equal(json.listing.attributes.billsIncluded, true);
+  assert.equal(json.listing.attributes.hacker, undefined, 'невідомий ключ відкинуто');
+  housingId = json.listing.id;
+});
+
+test('некоректне значення select відкидається', async () => {
+  const { json } = await req('POST', '/api/listings', {
+    token: tokenA,
+    body: {
+      title: 'Авто на продаж', description: 'Гарний стан, тех.огляд є.',
+      category: 'transport', location: 'Leeds', phone: '+447111000888', price: 4000,
+      attributes: { make: 'Ford', year: 2016, mileage: 80000, fuel: 'plutonium' },
+    },
+  });
+  assert.equal(json.listing.attributes.make, 'Ford');
+  assert.equal(json.listing.attributes.year, 2016);
+  assert.equal(json.listing.attributes.fuel, undefined, 'неприпустиме паливо відкинуто');
+});
+
+test('число поза діапазоном відкидається', async () => {
+  const { json } = await req('POST', '/api/listings', {
+    token: tokenA,
+    body: {
+      title: 'Старе авто', description: 'На запчастини.',
+      category: 'transport', location: 'Hull', phone: '+447111000777',
+      attributes: { year: 1800 },
+    },
+  });
+  assert.equal(json.listing.attributes.year, undefined, 'рік 1800 поза діапазоном');
+});
+
+test('фільтрація за характеристикою attr_rooms', async () => {
+  const found = await req('GET', '/api/listings?category=housing&attr_rooms=2');
+  assert.ok(found.json.items.some((l) => l.id === housingId));
+  const none = await req('GET', '/api/listings?category=housing&attr_rooms=4%2B');
+  assert.ok(!none.json.items.some((l) => l.id === housingId));
+});
+
 /* ============================ Чат ============================ */
 
 let threadId;

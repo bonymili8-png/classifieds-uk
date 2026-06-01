@@ -1,7 +1,7 @@
 // Простий офлайн-кеш оболонки застосунку.
 // Стратегії: статика — cache-first; API — network-first (з фолбеком у кеш).
 
-const CACHE = 'ouk-v5';
+const CACHE = 'ouk-v6';
 const SHELL = [
   '/',
   '/index.html',
@@ -11,6 +11,7 @@ const SHELL = [
   '/js/api.js',
   '/js/data.js',
   '/js/i18n.js',
+  '/js/attributes.js',
   '/manifest.webmanifest',
   '/icons/icon.svg',
 ];
