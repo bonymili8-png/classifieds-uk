@@ -77,6 +77,22 @@ function ratingBadgeHTML(rating) {
   return `<span class="rating-badge">${starsHTML(rating.avg)} <b>${rating.avg}</b> <small>(${t('rev.count', { n: rating.count })})</small></span>`;
 }
 
+// Чи може поточний користувач керувати оголошенням (власник, токен, або адмін).
+function canManageListing(l) {
+  if (session.isAuthed && session.user.isAdmin) return true;
+  if (session.isAuthed && l.owner && l.owner.id === session.user.id) return true;
+  return !!store.tokenFor(l.id);
+}
+
+// Текст про термін дії для власника.
+function expiryText(l) {
+  if (l.status === 'expired') return t('expiry.expired');
+  if (!l.expiresAt) return '';
+  const days = Math.ceil((new Date(l.expiresAt).getTime() - Date.now()) / 86400000);
+  if (days <= 0) return t('expiry.today');
+  return t('expiry.left', { n: days });
+}
+
 // Таблиця характеристик на сторінці оголошення.
 function attrsTable(attributes) {
   const entries = Object.entries(attributes || {}).filter(([, v]) => v !== '' && v != null && v !== false);
@@ -255,7 +271,7 @@ export const DetailView = {
     try {
       const { listing: l } = await api.get(ctx.params.id);
       const fav = store.isFav(l.id);
-      const isOwner = (session.isAuthed && l.owner && l.owner.id === session.user.id) || !!store.tokenFor(l.id);
+      const isOwner = canManageListing(l);
 
       const images = l.images || [];
       const gallery = images.length ? `
@@ -295,6 +311,7 @@ export const DetailView = {
             <div class="dc-head">
               <a class="card-cat" href="#/c/${l.category}" data-link>${esc(catLabel(l.category))}</a>
               ${l.status === 'sold' ? `<span class="sold-badge static">${esc(t('detail.sold'))}</span>` : ''}
+              ${l.status === 'expired' ? `<span class="sold-badge static" style="background:var(--muted)">${esc(t('status.expired'))}</span>` : ''}
             </div>
             <h1>${esc(l.title)}</h1>
             <div class="price-lg" style="${freeCls ? 'color:var(--success)' : ''}">${formatPrice(l)}</div>
@@ -320,12 +337,13 @@ export const DetailView = {
 
           ${isOwner ? `<div class="detail-card">
             <h2 class="dc-title">${esc(t('detail.manage'))}</h2>
+            ${expiryText(l) ? `<p class="expiry-note ${l.status === 'expired' ? 'is-expired' : ''}">⏳ ${esc(expiryText(l))}</p>` : ''}
             <div class="row-gap">
               <a class="btn" href="#/edit/${l.id}" data-link>✏️ ${esc(t('common.edit'))}</a>
               ${l.status === 'sold'
                 ? `<button class="btn" id="statusBtn" data-status="active">${esc(t('detail.markActive'))}</button>`
                 : `<button class="btn" id="statusBtn" data-status="sold">${esc(t('detail.markSold'))}</button>`}
-              <button class="btn" id="bumpBtn">⤴ ${esc(t('detail.bump'))}</button>
+              <button class="btn" id="bumpBtn">⤴ ${l.status === 'expired' ? esc(t('expiry.renew')) : esc(t('detail.bump'))}</button>
               <button class="btn btn-danger" id="delBtn">🗑️ ${esc(t('common.delete'))}</button>
             </div></div>` : ''}
         </div>
@@ -355,7 +373,8 @@ export const DetailView = {
       });
 
       el.querySelector('#shareBtn').addEventListener('click', async () => {
-        const url = location.href;
+        // Ділимося справжнім індексованим URL, а не hash-маршрутом.
+        const url = location.origin + '/listing/' + l.id;
         try {
           if (navigator.share) await navigator.share({ title: l.title, url });
           else { await navigator.clipboard.writeText(url); ctx.toast('🔗 ' + url); }
@@ -376,7 +395,11 @@ export const DetailView = {
       });
       const bumpBtn = el.querySelector('#bumpBtn');
       if (bumpBtn) bumpBtn.addEventListener('click', async () => {
-        try { await api.bump(l.id, store.tokenFor(l.id)); ctx.toast('⤴ ' + t('detail.bump')); } catch (e) { ctx.toast(e.message); }
+        try {
+          await api.bump(l.id, store.tokenFor(l.id));
+          ctx.toast(l.status === 'expired' ? t('expiry.renewed') : '⤴ ' + t('detail.bump'));
+          render();
+        } catch (e) { ctx.toast(e.message); }
       });
       const delBtn = el.querySelector('#delBtn');
       if (delBtn) delBtn.addEventListener('click', async () => {
@@ -613,7 +636,7 @@ export const FormView = {
     if (editing) {
       try {
         const { listing: l } = await api.get(ctx.params.id);
-        const isOwner = (session.isAuthed && l.owner && l.owner.id === session.user.id) || !!store.tokenFor(l.id);
+        const isOwner = canManageListing(l);
         if (!isOwner) $('#formAlert').innerHTML = `<div class="alert alert-error">${esc(t('detail.manage'))} ✗</div>`;
         $('#title').value = l.title; $('#description').value = l.description;
         $('#category').value = l.category; $('#location').value = l.location;
@@ -1026,35 +1049,133 @@ const REPORT_REASONS = {
   wrong: () => t('report.wrong'), other: () => t('report.other'),
 };
 
+const ADMIN_STATUSES = ['active', 'sold', 'expired', 'archived'];
+
 export const AdminView = {
   async render() {
     if (!session.isAuthed || !session.user.isAdmin) { location.hash = '#/'; return ''; }
     return `<div class="container">
       <div class="section-head"><h2>🛡️ ${esc(t('admin.title'))}</h2>
         <a class="btn btn-sm" href="${api.adminBackupUrl()}" download>${esc(t('admin.backup'))}</a></div>
-      <div class="admin-stats" id="adminStats">${gridSkeleton(4)}</div>
-      <div class="section-head" style="margin-top:26px">
-        <h2>${esc(t('admin.reports'))}</h2>
-        <div class="seg" id="repSeg">
-          <button class="seg-btn active" data-resolved="0">${esc(t('admin.open'))}</button>
-          <button class="seg-btn" data-resolved="1">${esc(t('admin.resolved'))}</button>
-        </div>
+
+      <div class="seg admin-tabs" id="adminTabs">
+        <button class="seg-btn active" data-tab="stats">${esc(t('admin.tabStats'))}</button>
+        <button class="seg-btn" data-tab="listings">${esc(t('admin.tabListings'))}</button>
+        <button class="seg-btn" data-tab="reports">${esc(t('admin.tabReports'))}</button>
       </div>
-      <div id="adminReports">${gridSkeleton(2)}</div>
+
+      <section data-pane="stats">
+        <div class="admin-stats mt16" id="adminStats">${gridSkeleton(4)}</div>
+      </section>
+
+      <section data-pane="listings" hidden>
+        <div class="toolbar mt16">
+          <input class="input" id="alQ" placeholder="${esc(t('admin.searchListings'))}" style="flex:1;min-width:160px">
+          <select class="select" id="alStatus" style="width:auto">
+            <option value="all">${esc(t('admin.allStatuses'))}</option>
+            ${ADMIN_STATUSES.map((s) => `<option value="${s}">${esc(t('status.' + s))}</option>`).join('')}
+          </select>
+          <a class="btn btn-primary" href="#/new" data-link>+ ${esc(t('nav.add'))}</a>
+        </div>
+        <div id="adminListings" class="mt16">${gridSkeleton(3)}</div>
+        <div class="pagination" id="alPager"></div>
+      </section>
+
+      <section data-pane="reports" hidden>
+        <div class="section-head" style="margin-top:18px">
+          <h2>${esc(t('admin.reports'))}</h2>
+          <div class="seg" id="repSeg">
+            <button class="seg-btn active" data-resolved="0">${esc(t('admin.open'))}</button>
+            <button class="seg-btn" data-resolved="1">${esc(t('admin.resolved'))}</button>
+          </div>
+        </div>
+        <div id="adminReports">${gridSkeleton(2)}</div>
+      </section>
     </div>`;
   },
   async mount(root, ctx) {
     if (!session.isAuthed || !session.user.isAdmin) return;
     let showResolved = false;
 
+    /* -------- Перемикання вкладок -------- */
+    root.querySelectorAll('#adminTabs .seg-btn').forEach((b) => b.addEventListener('click', () => {
+      root.querySelectorAll('#adminTabs .seg-btn').forEach((x) => x.classList.toggle('active', x === b));
+      const tab = b.dataset.tab;
+      root.querySelectorAll('[data-pane]').forEach((p) => { p.hidden = p.dataset.pane !== tab; });
+      if (tab === 'listings') loadListings();
+      if (tab === 'reports') loadReports();
+    }));
+
+    /* -------- Управління оголошеннями -------- */
+    let alPage = 1;
+    async function loadListings() {
+      const box = root.querySelector('#adminListings');
+      box.innerHTML = gridSkeleton(3);
+      try {
+        const data = await api.list({
+          q: root.querySelector('#alQ').value.trim(),
+          status: root.querySelector('#alStatus').value,
+          page: alPage, perPage: 24,
+        });
+        if (!data.items.length) { box.innerHTML = emptyHTML(t('empty.title'), ''); root.querySelector('#alPager').innerHTML = ''; return; }
+        box.innerHTML = `<div class="admin-listing-list">${data.items.map(adminListingRow).join('')}</div>`;
+        bindListingRowActions(box);
+        renderAlPager(data);
+      } catch (e) { box.innerHTML = `<div class="alert alert-error">${esc(e.message)}</div>`; }
+    }
+
+    function adminListingRow(l) {
+      return `<div class="al-row">
+        <div class="al-main">
+          <a href="#/l/${l.id}" data-link class="al-title">${esc(l.title)}</a>
+          <div class="al-meta muted">${esc(catLabel(l.category))} · ${esc(formatPrice(l))} · ${esc(l.location)}
+            <span class="status-pill status-${esc(l.status)}">${esc(t('status.' + l.status) || l.status)}</span></div>
+        </div>
+        <div class="al-actions">
+          <a class="btn btn-sm" href="#/edit/${l.id}" data-link>✏️</a>
+          <select class="select al-status" data-id="${l.id}" title="status">
+            ${ADMIN_STATUSES.map((s) => `<option value="${s}" ${l.status === s ? 'selected' : ''}>${esc(t('status.' + s))}</option>`).join('')}
+          </select>
+          <button class="btn btn-sm btn-danger" data-del="${l.id}">🗑</button>
+        </div>
+      </div>`;
+    }
+
+    function bindListingRowActions(box) {
+      box.querySelectorAll('.al-status').forEach((sel) => sel.addEventListener('change', async () => {
+        try { await api.setStatus(sel.dataset.id, sel.value); ctx.toast(t('admin.statusChanged')); loadListings(); loadStats(); }
+        catch (e) { ctx.toast(e.message); }
+      }));
+      box.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', async () => {
+        if (!confirm(t('admin.delete') + '?')) return;
+        try { await api.adminDeleteListing(b.dataset.del); ctx.toast(t('admin.deleted')); loadListings(); loadStats(); }
+        catch (e) { ctx.toast(e.message); }
+      }));
+    }
+
+    function renderAlPager(data) {
+      const pager = root.querySelector('#alPager');
+      if (data.pages <= 1) { pager.innerHTML = ''; return; }
+      const btn = (n, label, dis, cur) => `<button class="btn ${cur ? 'btn-primary' : ''}" data-p="${n}" ${dis ? 'disabled' : ''}>${label}</button>`;
+      let html = btn(alPage - 1, '‹', alPage <= 1);
+      html += `<span class="muted" style="align-self:center">${alPage}/${data.pages}</span>`;
+      html += btn(alPage + 1, '›', alPage >= data.pages);
+      pager.innerHTML = html;
+      pager.querySelectorAll('[data-p]').forEach((b) => b.addEventListener('click', () => { alPage = Number(b.dataset.p); loadListings(); }));
+    }
+
+    let alTimer;
+    root.querySelector('#alQ').addEventListener('input', () => { clearTimeout(alTimer); alTimer = setTimeout(() => { alPage = 1; loadListings(); }, 350); });
+    root.querySelector('#alStatus').addEventListener('change', () => { alPage = 1; loadListings(); });
+
     async function loadStats() {
       try {
         const s = await api.adminStats();
         const tiles = [
           ['admin.statListings', s.listings], ['admin.statActive', s.active],
-          ['admin.statSold', s.sold], ['admin.statUsers', s.users],
-          ['admin.statMessages', s.messages], ['admin.statReports', s.reportsOpen],
-          ['admin.statToday', s.newListingsToday],
+          ['admin.statSold', s.sold], ['admin.statExpired', s.expired ?? 0],
+          ['admin.statUsers', s.users], ['admin.statMessages', s.messages],
+          ['admin.statReports', s.reportsOpen], ['admin.statToday', s.newListingsToday],
         ];
         root.querySelector('#adminStats').innerHTML = tiles.map(([k, v]) =>
           `<div class="stat-tile"><div class="stat-n">${v}</div><div class="stat-l">${esc(t(k))}</div></div>`).join('');

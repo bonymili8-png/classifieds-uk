@@ -477,3 +477,24 @@ label.lbl .req { color: var(--danger); }
 .attr-row dd { font-weight: 600; }
 .card-chips { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 10px; }
 .card-chip { font-size: .72rem; font-weight: 600; color: var(--muted); background: var(--surface-2); border: 1px solid var(--border); padding: 2px 8px; border-radius: var(--r-pill); white-space: nowrap; }
+
+/* -------- Адмінка: управління оголошеннями -------- */
+.admin-tabs { margin-top: 14px; }
+.admin-listing-list { display: flex; flex-direction: column; gap: 8px; }
+.al-row { display: flex; align-items: center; gap: 12px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: 10px 14px; }
+.al-main { flex: 1; min-width: 0; }
+.al-title { font-weight: 700; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.al-meta { font-size: .82rem; margin-top: 2px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.al-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.al-actions .select { width: auto; padding: 6px 8px; font-size: .82rem; }
+@media (max-width: 560px) { .al-row { flex-wrap: wrap; } .al-actions { width: 100%; } }
+
+.status-pill { font-size: .7rem; font-weight: 700; padding: 2px 8px; border-radius: var(--r-pill); }
+.status-active { background: color-mix(in srgb, var(--success) 16%, transparent); color: var(--success); }
+.status-sold { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
+.status-expired { background: color-mix(in srgb, var(--muted) 18%, transparent); color: var(--muted); }
+.status-archived { background: var(--surface-2); color: var(--muted); }
+
+.expiry-note { font-size: .85rem; color: var(--muted); margin: 0 0 12px; }
+.expiry-note.is-expired { color: var(--danger); font-weight: 600; }

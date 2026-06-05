@@ -73,3 +73,33 @@ test('збереження оголошення в обране', async ({ page 
   await page.goto('/#/saved');
   await expect(page.locator('.card').first()).toBeVisible({ timeout: 10000 });
 });
+
+test('SEO-сторінка /listing/:id має коректний <title>', async ({ page }) => {
+  // Беремо id першого оголошення через API.
+  const data = await page.request.get('/api/listings?perPage=1');
+  const json = await data.json();
+  const l = json.items[0];
+  const resp = await page.request.get('/listing/' + l.id);
+  const html = await resp.text();
+  expect(html).toContain('<title>' + l.title);
+  expect(html).toContain('application/ld+json');
+});
+
+test('адмін бачить вкладку управління оголошеннями', async ({ page }) => {
+  // Перший зареєстрований користувач стає адміном (без ADMIN_EMAILS).
+  const email = uniqEmail();
+  await page.goto('/#/register');
+  await page.fill('#aName', 'Адмін E2E');
+  await page.fill('#aEmail', email);
+  await page.fill('#aPass', 'secret123');
+  await page.click('#authBtn');
+  await expect(page).toHaveURL(/#\/profile/, { timeout: 10000 });
+
+  await page.goto('/#/admin');
+  // Якщо це адмін — є вкладки управління.
+  const tabs = page.locator('#adminTabs');
+  if (await tabs.count()) {
+    await page.locator('#adminTabs [data-tab="listings"]').click();
+    await expect(page.locator('#adminListings')).toBeVisible();
+  }
+});

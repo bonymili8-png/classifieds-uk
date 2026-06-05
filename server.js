@@ -15,6 +15,7 @@ import { promises as fs } from 'node:fs';
 import fssync from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import {
   sendMail, mailEnabled,
@@ -34,6 +35,10 @@ const DB_FILE = path.join(DATA_DIR, 'db.runtime.json');
 
 const MAX_BODY = 20 * 1024 * 1024; // 20 МБ — вистачає на кілька стиснених фото
 const SESSION_TTL = 1000 * 60 * 60 * 24 * 30; // 30 днів
+
+// Термін дії оголошення (днів) — після нього стає "expired" і зникає з пошуку/sitemap.
+const LISTING_TTL_DAYS = Number(process.env.LISTING_TTL_DAYS) || 45;
+const LISTING_TTL = LISTING_TTL_DAYS * 24 * 60 * 60 * 1000;
 
 // Публічна адреса (для канонічних URL у sitemap.xml). Можна задати через SITE_URL.
 const SITE_URL = (process.env.SITE_URL || '').replace(/\/+$/, '');
@@ -134,8 +139,28 @@ async function loadDB() {
     l.status ||= 'active';
     l.bumpedAt ||= l.createdAt;
     if (!('userId' in l)) l.userId = null;
+    // Дата завершення: від bumpedAt (підняття/створення) + TTL.
+    if (!l.expiresAt) {
+      l.expiresAt = new Date(new Date(l.bumpedAt || l.createdAt).getTime() + LISTING_TTL).toISOString();
+    }
   }
   pruneSessions();
+  expireListings();
+}
+
+// Переводить активні прострочені оголошення у статус "expired".
+// Повертає кількість змінених. Викликається при старті та періодично.
+function expireListings() {
+  const now = Date.now();
+  let changed = 0;
+  for (const l of DB.listings) {
+    if (l.status === 'active' && l.expiresAt && new Date(l.expiresAt).getTime() < now) {
+      l.status = 'expired';
+      changed++;
+    }
+  }
+  if (changed) saveDB();
+  return changed;
 }
 
 let saveQueue = Promise.resolve();
@@ -197,15 +222,31 @@ function validEmail(v) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || '').trim());
 }
 
+// Чи підтримує клієнт gzip (виставляється в головному обробнику).
+const GZIP_OK = new WeakMap();
+
+function maybeGzip(res, buf, headers) {
+  // Стискаємо лише відчутні відповіді, коли клієнт це підтримує.
+  if (GZIP_OK.get(res) && buf.length > 1024) {
+    const gz = zlib.gzipSync(buf);
+    headers['Content-Encoding'] = 'gzip';
+    headers['Vary'] = headers['Vary'] ? headers['Vary'] + ', Accept-Encoding' : 'Accept-Encoding';
+    return gz;
+  }
+  return buf;
+}
+
 function send(res, status, body, headers = {}) {
-  const payload = typeof body === 'string' || Buffer.isBuffer(body)
-    ? body
-    : JSON.stringify(body);
-  res.writeHead(status, {
+  const raw = typeof body === 'string' || Buffer.isBuffer(body)
+    ? Buffer.from(body)
+    : Buffer.from(JSON.stringify(body));
+  const h = {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
     ...headers,
-  });
+  };
+  const payload = maybeGzip(res, raw, h);
+  res.writeHead(status, h);
   res.end(payload);
 }
 
@@ -519,6 +560,7 @@ async function createListing(body, user) {
     userId: user ? user.id : null,
     status: 'active',
     createdAt: now, updatedAt: now, bumpedAt: now,
+    expiresAt: new Date(Date.now() + LISTING_TTL).toISOString(),
     views: 0,
     editTokenHash: sha256(token),
   };
@@ -532,17 +574,24 @@ async function updateListing(id, body, user, url) {
   if (!l) return { status: 404, body: { error: 'Оголошення не знайдено.' } };
   if (!canManage(l, user, body, url)) return { status: 403, body: { error: 'Немає прав на редагування.' } };
 
-  // Зміна лише статусу (продано / активне) або підняття.
+  // Зміна лише статусу (продано / активне / архів). Адмін може ставити будь-який.
   if (body.action === 'status' && typeof body.status === 'string') {
-    if (['active', 'sold', 'archived'].includes(body.status)) {
-      l.status = body.status; l.updatedAt = new Date().toISOString();
+    if (['active', 'sold', 'archived', 'expired'].includes(body.status)) {
+      l.status = body.status;
+      l.updatedAt = new Date().toISOString();
+      // Реактивація продовжує термін дії.
+      if (body.status === 'active') l.expiresAt = new Date(Date.now() + LISTING_TTL).toISOString();
       await saveDB();
       return { status: 200, body: { listing: publicListing(l) } };
     }
     return { status: 400, body: { error: 'Невідомий статус.' } };
   }
-  if (body.action === 'bump') {
-    l.bumpedAt = new Date().toISOString();
+  // Підняти / продовжити: оновлює дату й термін дії, реактивує прострочене.
+  if (body.action === 'bump' || body.action === 'renew') {
+    const now = new Date();
+    l.bumpedAt = now.toISOString();
+    l.expiresAt = new Date(now.getTime() + LISTING_TTL).toISOString();
+    if (l.status === 'expired') l.status = 'active';
     await saveDB();
     return { status: 200, body: { listing: publicListing(l) } };
   }
@@ -555,7 +604,13 @@ async function updateListing(id, body, user, url) {
   const fresh = await saveImages(body.images, id);
   await removeImageFiles(removed);
 
-  Object.assign(l, value, { images: fresh, updatedAt: new Date().toISOString() });
+  const patch = { images: fresh, updatedAt: new Date().toISOString() };
+  // Редагування прострочених/архівних оголошень повертає їх до активних і продовжує термін.
+  if (l.status === 'expired' || l.status === 'archived') {
+    patch.status = 'active';
+    patch.expiresAt = new Date(Date.now() + LISTING_TTL).toISOString();
+  }
+  Object.assign(l, value, patch);
   await saveDB();
   return { status: 200, body: { listing: publicListing(l) } };
 }
@@ -585,11 +640,16 @@ function queryListings(params, user) {
   const status = params.get('status'); // active|sold|all
   const withPhoto = params.get('photo');
 
+  // Активне "насправді" = статус active і ще не прострочене (на випадок,
+  // якщо фоновий прибиральник ще не відпрацював).
+  const now = Date.now();
+  const isLive = (l) => l.status === 'active' && (!l.expiresAt || new Date(l.expiresAt).getTime() >= now);
+
   // За замовчуванням показуємо лише активні (крім фільтра за власником/статусом).
   if (ownerId) items = items.filter((l) => l.userId === ownerId);
   else if (status === 'all') { /* усі */ }
   else if (status) items = items.filter((l) => l.status === status);
-  else items = items.filter((l) => l.status === 'active');
+  else items = items.filter(isLive);
 
   if (q) {
     items = items.filter((l) =>
@@ -888,6 +948,7 @@ function adminStats() {
     listings: DB.listings.length,
     active: DB.listings.filter((l) => l.status === 'active').length,
     sold: DB.listings.filter((l) => l.status === 'sold').length,
+    expired: DB.listings.filter((l) => l.status === 'expired').length,
     users: DB.users.length,
     messages: DB.messages.length,
     reportsOpen: DB.reports.filter((r) => !r.resolved).length,
@@ -969,12 +1030,14 @@ function serveSitemap(req, res, url) {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[c]));
   const urls = [
     { loc: `${base}/`, priority: '1.0' },
-    { loc: `${base}/#/search`, priority: '0.8' },
+    { loc: `${base}/search`, priority: '0.8' },
   ];
-  // Активні оголошення — як хеш-маршрути.
+  // Лише живі оголошення — справжні (індексовані) URL. Прострочені не потрапляють.
+  const now = Date.now();
   for (const l of DB.listings) {
     if (l.status !== 'active') continue;
-    urls.push({ loc: `${base}/#/l/${l.id}`, lastmod: (l.updatedAt || l.createdAt).slice(0, 10), priority: '0.6' });
+    if (l.expiresAt && new Date(l.expiresAt).getTime() < now) continue;
+    urls.push({ loc: `${base}/listing/${l.id}`, lastmod: (l.updatedAt || l.createdAt).slice(0, 10), priority: '0.6' });
   }
   const xml = `<?xml version="1.0" encoding="UTF-8"?>\n` +
     `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
@@ -984,6 +1047,84 @@ function serveSitemap(req, res, url) {
     `\n</urlset>\n`;
   res.writeHead(200, { 'Content-Type': 'application/xml; charset=utf-8', 'Cache-Control': 'public, max-age=3600' });
   res.end(xml);
+}
+
+// Кеш шаблону index.html (читаємо один раз).
+let INDEX_HTML = null;
+async function getIndexHtml() {
+  if (INDEX_HTML == null) INDEX_HTML = await fs.readFile(path.join(PUBLIC_DIR, 'index.html'), 'utf8');
+  return INDEX_HTML;
+}
+
+function htmlEscape(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// Серверний рендер сторінки оголошення з SEO-метатегами.
+async function serveListingPage(req, res, id) {
+  const l = DB.listings.find((x) => x.id === id);
+  let html = await getIndexHtml();
+
+  // Окремий CSP-nonce, щоб дозволити інлайн JSON-LD та підказку SPA на цій сторінці.
+  const nonce = crypto.randomBytes(12).toString('base64');
+  securityHeaders(req, res, nonce);
+
+  if (!l) {
+    res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    return res.end(html);
+  }
+
+  const base = baseUrl(req);
+  const canonical = `${base}/listing/${l.id}`;
+  const priceStr = l.isFree || l.price === 0 ? 'Безкоштовно' : (l.price != null ? `£${l.price}` : 'Договірна');
+  const title = `${l.title} — ${priceStr}, ${l.location} | ОголошенняUK`;
+  const desc = (l.description || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+  const image = (l.images && l.images[0]) ? base + l.images[0] : `${base}/icons/icon-512.png`;
+  const live = l.status === 'active' && (!l.expiresAt || new Date(l.expiresAt).getTime() >= Date.now());
+
+  // JSON-LD (Schema.org Product/Offer) — для багатих результатів пошуку.
+  const jsonLd = {
+    '@context': 'https://schema.org', '@type': 'Product',
+    name: l.title, description: desc,
+    image: l.images && l.images.length ? l.images.map((p) => base + p) : undefined,
+    category: l.category,
+    offers: {
+      '@type': 'Offer', priceCurrency: 'GBP',
+      price: l.isFree ? 0 : (l.price ?? undefined),
+      availability: live ? 'https://schema.org/InStock' : 'https://schema.org/SoldOut',
+      areaServed: l.location, url: canonical,
+    },
+  };
+
+  const head = [
+    `<title>${htmlEscape(title)}</title>`,
+    `<meta name="description" content="${htmlEscape(desc)}">`,
+    `<link rel="canonical" href="${htmlEscape(canonical)}">`,
+    !live ? `<meta name="robots" content="noindex">` : '',
+    `<meta property="og:type" content="product">`,
+    `<meta property="og:title" content="${htmlEscape(l.title)}">`,
+    `<meta property="og:description" content="${htmlEscape(desc)}">`,
+    `<meta property="og:image" content="${htmlEscape(image)}">`,
+    `<meta property="og:url" content="${htmlEscape(canonical)}">`,
+    `<meta name="twitter:card" content="summary_large_image">`,
+    `<script type="application/ld+json" nonce="${nonce}">${JSON.stringify(jsonLd)}</script>`,
+    // Підказка для SPA: відкрити саме це оголошення (клієнт прочитає й зробить redirect на hash-маршрут).
+    `<script nonce="${nonce}">window.__SEO_LISTING__=${JSON.stringify(l.id)};</script>`,
+  ].filter(Boolean).join('\n  ');
+
+  // Прибираємо дефолтні теги з шаблону, щоб не дублювати, і вставляємо свої.
+  html = html
+    .replace(/<title>[\s\S]*?<\/title>/i, '')
+    .replace(/<meta name="description"[^>]*>/i, '')
+    .replace(/<meta property="og:[^"]*"[^>]*>/gi, '');
+  html = html.replace('</head>', `  ${head}\n</head>`);
+
+  res.writeHead(live ? 200 : 410, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': live ? 'public, max-age=120' : 'no-store',
+  });
+  res.end(html);
 }
 
 /* ----------------------------------------------------------------------------
@@ -1213,18 +1354,24 @@ async function handleApi(req, res, url) {
  * ------------------------------------------------------------------------- */
 
 // Заголовки безпеки для всіх відповідей.
-function securityHeaders(res) {
+function securityHeaders(req, res, nonce) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
-  // CSP: дозволяємо лише власні ресурси + data:/blob: для зображень (фото як data-URL),
-  // та зовнішні переходи на tel:/wa.me/t.me відкриваються браузером поза CSP.
+  // HSTS лише коли запит прийшов по HTTPS (через проксі — X-Forwarded-Proto).
+  const proto = (req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  if (proto === 'https') {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+  // CSP: лише власні ресурси + data:/blob: для зображень (фото як data-URL).
+  // Для SEO-сторінки додаємо nonce, щоб дозволити інлайн JSON-LD та підказку SPA.
+  const scriptSrc = nonce ? `script-src 'self' 'nonce-${nonce}'` : "script-src 'self'";
   res.setHeader('Content-Security-Policy', [
     "default-src 'self'",
     "img-src 'self' data: blob:",
     "style-src 'self' 'unsafe-inline'",
-    "script-src 'self'",
+    scriptSrc,
     "connect-src 'self'",
     "base-uri 'self'",
     "form-action 'self'",
@@ -1238,7 +1385,8 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
-  securityHeaders(res);
+  securityHeaders(req, res);
+  if (/\bgzip\b/.test(req.headers['accept-encoding'] || '')) GZIP_OK.set(res, true);
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
     return res.end();
@@ -1247,6 +1395,11 @@ const server = http.createServer(async (req, res) => {
   // robots.txt та sitemap.xml — для пошукових систем.
   if (url.pathname === '/robots.txt') return serveRobots(req, res, url);
   if (url.pathname === '/sitemap.xml') return serveSitemap(req, res, url);
+
+  // SEO-сторінка оголошення: справжній індексований URL із серверним <title>,
+  // meta-description, Open Graph і JSON-LD. SPA на клієнті перехоплює навігацію.
+  const seoMatch = /^\/listing\/([A-Za-z0-9_-]+)\/?$/.exec(url.pathname);
+  if (seoMatch && req.method === 'GET') return serveListingPage(req, res, seoMatch[1]);
 
   if (url.pathname.startsWith('/api/')) {
     // Базовий ліміт на всі API-запити з однієї адреси.
@@ -1259,8 +1412,12 @@ const server = http.createServer(async (req, res) => {
 });
 
 loadDB().then(() => {
+  // Періодично прибираємо прострочені оголошення (раз на годину).
+  setInterval(expireListings, 60 * 60 * 1000).unref?.();
+
   server.listen(PORT, HOST, () => {
     console.log(`\n  ОголошенняUK ▸ http://localhost:${PORT}`);
     console.log(`  Оголошень: ${DB.listings.length} · Користувачів: ${DB.users.length}\n`);
+    console.log(`  Термін дії оголошення: ${LISTING_TTL_DAYS} днів · Пошта: ${mailEnabled ? 'увімкнено' : 'лог'}\n`);
   });
 });

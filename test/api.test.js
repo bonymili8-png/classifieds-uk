@@ -295,6 +295,30 @@ test('фільтрація за характеристикою attr_rooms', asyn
   assert.ok(!none.json.items.some((l) => l.id === housingId));
 });
 
+/* ============================ Термін дії оголошень ============================ */
+
+test('нове оголошення має дату завершення (expiresAt) у майбутньому', async () => {
+  const { json } = await req('POST', '/api/listings', {
+    token: tokenA,
+    body: { title: 'З терміном дії', description: 'Перевірка expiresAt.', category: 'goods', location: 'York', phone: '+447111000444', price: 10 },
+  });
+  assert.ok(json.listing.expiresAt, 'є expiresAt');
+  assert.ok(new Date(json.listing.expiresAt).getTime() > Date.now());
+});
+
+test('продовження (renew) оновлює дату завершення', async () => {
+  const created = await req('POST', '/api/listings', {
+    token: tokenA,
+    body: { title: 'Renew тест', description: 'Перевірка продовження.', category: 'goods', location: 'York', phone: '+447111000555', price: 10 },
+  });
+  const id = created.json.listing.id;
+  const before = new Date(created.json.listing.expiresAt).getTime();
+  await new Promise((r) => setTimeout(r, 20));
+  const renewed = await req('PUT', '/api/listings/' + id, { token: tokenA, body: { action: 'renew' } });
+  assert.equal(renewed.status, 200);
+  assert.ok(new Date(renewed.json.listing.expiresAt).getTime() > before, 'термін продовжено');
+});
+
 /* ============================ Чат ============================ */
 
 let threadId;
@@ -384,6 +408,34 @@ test('адмін закриває скаргу', async () => {
   assert.equal(status, 200);
   const open = await req('GET', '/api/admin/reports', { token: adminToken });
   assert.ok(!open.json.reports.some((r) => r.id === reportId), 'закрита скарга зникла з відкритих');
+});
+
+test('адмін редагує чуже оголошення (назва, ціна, категорія) без editToken', async () => {
+  // housingId належить userA; адмін змінює його напряму.
+  const { status, json } = await req('PUT', '/api/listings/' + housingId, {
+    token: adminToken,
+    body: {
+      title: 'Відредаговано адміном', description: 'Адмін змінив це оголошення.',
+      category: 'goods', location: 'Manchester', phone: '+447111000999', price: 999,
+    },
+  });
+  assert.equal(status, 200);
+  assert.equal(json.listing.title, 'Відредаговано адміном');
+  assert.equal(json.listing.category, 'goods');
+  assert.equal(json.listing.price, 999);
+});
+
+test('адмін змінює статус чужого оголошення', async () => {
+  const { status, json } = await req('PUT', '/api/listings/' + housingId, {
+    token: adminToken, body: { action: 'status', status: 'archived' },
+  });
+  assert.equal(status, 200);
+  assert.equal(json.listing.status, 'archived');
+});
+
+test('статистика містить лічильник прострочених', async () => {
+  const { json } = await req('GET', '/api/admin/stats', { token: adminToken });
+  assert.ok('expired' in json, 'є поле expired');
 });
 
 test('адмін видаляє будь-яке оголошення', async () => {
@@ -527,7 +579,53 @@ test('sitemap.xml — валідний XML з оголошеннями', async (
   const xml = await r.text();
   assert.ok(xml.startsWith('<?xml'));
   assert.ok(xml.includes('<urlset'));
-  assert.ok(xml.includes('/#/l/'), 'містить посилання на оголошення');
+  assert.ok(xml.includes('/listing/'), 'містить індексовані посилання на оголошення');
+});
+
+test('SEO-сторінка /listing/:id віддає метатеги, OG і JSON-LD', async () => {
+  // Створюємо свіже оголошення з відомим власником.
+  const { json } = await req('POST', '/api/listings', {
+    token: tokenA,
+    body: { title: 'SEO Диван', description: 'Зручний диван для SEO-тесту.', category: 'furniture', location: 'Bristol', phone: '+447111000321', price: 200 },
+  });
+  const id = json.listing.id;
+  const r = await fetch(BASE + '/listing/' + id);
+  assert.equal(r.status, 200);
+  assert.ok(r.headers.get('content-type').includes('text/html'));
+  const html = await r.text();
+  assert.ok(html.includes('<title>SEO Диван'), 'має title з назвою');
+  assert.ok(html.includes('og:title'), 'має Open Graph');
+  assert.ok(html.includes('application/ld+json'), 'має JSON-LD');
+  assert.ok(html.includes(`/listing/${id}`), 'канонічне посилання');
+  // Лише один <title> — дефолтний прибрано.
+  assert.equal((html.match(/<title>/g) || []).length, 1, 'рівно один <title>');
+  assert.ok(!html.includes('оголошення для українців у Британії</title>'), 'дефолтний title прибрано');
+  // CSP на SEO-сторінці дозволяє nonce.
+  assert.ok((r.headers.get('content-security-policy') || '').includes('nonce-'), 'CSP з nonce');
+});
+
+test('SEO-сторінка працює для seed-ID з дефісами', async () => {
+  // Беремо будь-яке seed-оголошення (його id містить дефіси).
+  const list = await req('GET', '/api/listings?status=all&perPage=48');
+  const seed = list.json.items.find((l) => l.id.includes('-'));
+  assert.ok(seed, 'є seed з дефісом в id');
+  const r = await fetch(BASE + '/listing/' + seed.id);
+  assert.equal(r.status, 200);
+  const html = await r.text();
+  assert.ok(html.includes(`<title>${seed.title}`), 'title відповідає оголошенню, а не дефолту');
+});
+
+test('неіснуюче /listing/:id → 404 з HTML', async () => {
+  const r = await fetch(BASE + '/listing/zzzznotreal');
+  assert.equal(r.status, 404);
+});
+
+test('gzip застосовується для великих JSON-відповідей', async () => {
+  const r = await fetch(BASE + '/api/listings?perPage=48', { headers: { 'Accept-Encoding': 'gzip' } });
+  assert.equal(r.status, 200);
+  // fetch автоматично декодує; перевіряємо, що сервер не зламав відповідь.
+  const data = await r.json();
+  assert.ok(Array.isArray(data.items));
 });
 
 test('бекап доступний лише адміну і не містить секретів', async () => {

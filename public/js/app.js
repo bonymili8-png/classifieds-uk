@@ -199,6 +199,11 @@ document.getElementById('searchForm').addEventListener('submit', (e) => {
 });
 
 /* ----------------------------- Старт ----------------------------- */
+// Якщо зайшли на SEO-URL /listing/:id (із сервера) — переходимо на маршрут SPA.
+if (window.__SEO_LISTING__ && !location.hash) {
+  history.replaceState(null, '', '/#/l/' + window.__SEO_LISTING__);
+}
+
 applyStaticText();
 renderAuthArea();
 render();

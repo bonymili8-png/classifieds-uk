@@ -11,7 +11,14 @@
   <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="icon" type="image/svg+xml" href="/icons/icon.svg" />
   <link rel="apple-touch-icon" href="/icons/icon.svg" />
+
+  <!-- Пришвидшуємо завантаження: preload критичних ресурсів + модуль головного коду. -->
+  <link rel="preload" href="/css/styles.css" as="style" />
   <link rel="stylesheet" href="/css/styles.css" />
+  <link rel="modulepreload" href="/js/app.js" />
+  <link rel="modulepreload" href="/js/views.js" />
+  <link rel="modulepreload" href="/js/data.js" />
+  <link rel="modulepreload" href="/js/api.js" />
 
   <meta property="og:title" content="ОголошенняUK — оголошення для українців у Британії" />
   <meta property="og:description" content="Робота, житло, послуги, речі та підвезення для української спільноти в UK." />
