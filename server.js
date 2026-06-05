@@ -104,7 +104,19 @@ let DB = {
   reports: [],    // { id, listingId, reason, text, createdAt, resolved }
   reviews: [],    // { id, sellerId, authorId, rating, text, createdAt }
   resets: {},     // token -> { userId, expiresAt }
+  events: [],     // { id, type, listingId?, userId?, ts } — аналітика подій
+  orders: [],     // { id, userId, listingId, plan, amount, currency, status, createdAt, paidAt? } — монетизація
+  audit: [],      // { id, adminId, action, target, ts } — журнал дій адміна
 };
+
+// Тарифи преміум-розміщення. amount у пенсах (GBP). days — тривалість ефекту.
+const PLANS = {
+  featured7: { label: 'Виділене 7 днів', amount: 499, days: 7, featured: true },
+  featured30: { label: 'Виділене 30 днів', amount: 1499, days: 30, featured: true },
+  bump: { label: 'Підняти нагору', amount: 199, days: 0, featured: false, bump: true },
+};
+// Скільки безкоштовних активних оголошень дозволено одному акаунту.
+const FREE_LISTING_QUOTA = Number(process.env.FREE_LISTING_QUOTA) || 10;
 
 async function ensureDirs() {
   await fs.mkdir(DATA_DIR, { recursive: true });
@@ -134,18 +146,39 @@ async function loadDB() {
   DB.reports ||= [];
   DB.reviews ||= [];
   DB.resets ||= {};
+  DB.events ||= [];
+  DB.orders ||= [];
+  DB.audit ||= [];
   // Дефолтні поля для старих оголошень.
   for (const l of DB.listings) {
     l.status ||= 'active';
     l.bumpedAt ||= l.createdAt;
     if (!('userId' in l)) l.userId = null;
+    if (!('featured' in l)) l.featured = false;       // преміум-виділення
+    if (!('featuredUntil' in l)) l.featuredUntil = null;
+    if (!l.stats) l.stats = { views: l.views || 0, contactClicks: 0, chatClicks: 0, saves: 0 };
     // Дата завершення: від bumpedAt (підняття/створення) + TTL.
     if (!l.expiresAt) {
       l.expiresAt = new Date(new Date(l.bumpedAt || l.createdAt).getTime() + LISTING_TTL).toISOString();
     }
   }
+  for (const u of DB.users) { if (!('banned' in u)) u.banned = false; }
   pruneSessions();
   expireListings();
+  expireFeatured();
+}
+
+// Знімає преміум-виділення, термін якого вийшов.
+function expireFeatured() {
+  const now = Date.now();
+  let changed = 0;
+  for (const l of DB.listings) {
+    if (l.featured && l.featuredUntil && new Date(l.featuredUntil).getTime() < now) {
+      l.featured = false; changed++;
+    }
+  }
+  if (changed) saveDB();
+  return changed;
 }
 
 // Переводить активні прострочені оголошення у статус "expired".
@@ -368,7 +401,7 @@ function publicUser(u) {
 }
 function selfUser(u) {
   if (!u) return null;
-  return { ...publicUser(u), email: u.email, phone: u.phone || '', isAdmin: isAdmin(u) };
+  return { ...publicUser(u), email: u.email, phone: u.phone || '', isAdmin: isAdmin(u), banned: !!u.banned };
 }
 
 async function registerUser(body) {
@@ -404,6 +437,7 @@ async function loginUser(body) {
   if (!user || !verifyPassword(password, user.salt, user.hash)) {
     return { status: 401, body: { error: 'Невірний email або пароль.' } };
   }
+  if (user.banned) return { status: 403, body: { error: 'Акаунт заблоковано. Зверніться до підтримки.' } };
   const token = issueSession(user.id);
   await saveDB();
   return { status: 200, body: { token, user: selfUser(user) } };
@@ -547,6 +581,16 @@ function canManage(listing, user, body, url) {
 }
 
 async function createListing(body, user) {
+  if (user && user.banned) return { status: 403, body: { error: 'Ваш акаунт заблоковано.' } };
+
+  // Квота безкоштовних активних оголошень на акаунт (захист від спаму, основа монетизації).
+  if (user && !isAdmin(user)) {
+    const activeOwn = DB.listings.filter((l) => l.userId === user.id && l.status === 'active').length;
+    if (activeOwn >= FREE_LISTING_QUOTA) {
+      return { status: 402, body: { error: `Досягнуто ліміту безкоштовних оголошень (${FREE_LISTING_QUOTA}). Архівуйте старі або скористайтеся преміум-розміщенням.` } };
+    }
+  }
+
   const { errors, value } = validateListing(body);
   if (errors.length) return { status: 400, body: { error: errors.join(' ') } };
 
@@ -558,10 +602,10 @@ async function createListing(body, user) {
   const listing = {
     id, ...value, images,
     userId: user ? user.id : null,
-    status: 'active',
+    status: 'active', featured: false, featuredUntil: null,
     createdAt: now, updatedAt: now, bumpedAt: now,
     expiresAt: new Date(Date.now() + LISTING_TTL).toISOString(),
-    views: 0,
+    views: 0, stats: { views: 0, contactClicks: 0, chatClicks: 0, saves: 0 },
     editTokenHash: sha256(token),
   };
   DB.listings.unshift(listing);
@@ -669,12 +713,19 @@ function queryListings(params, user) {
     items = items.filter((l) => l.attributes && String(l.attributes[key]) === String(v));
   }
 
-  switch (sort) {
-    case 'cheap': items.sort((a, b) => (a.price ?? Infinity) - (b.price ?? Infinity)); break;
-    case 'expensive': items.sort((a, b) => (b.price ?? -1) - (a.price ?? -1)); break;
-    case 'popular': items.sort((a, b) => (b.views || 0) - (a.views || 0)); break;
-    default: items.sort((a, b) => ((b.bumpedAt || b.createdAt) > (a.bumpedAt || a.createdAt) ? 1 : -1));
-  }
+  const byField = {
+    cheap: (a, b) => (a.price ?? Infinity) - (b.price ?? Infinity),
+    expensive: (a, b) => (b.price ?? -1) - (a.price ?? -1),
+    popular: (a, b) => (b.views || 0) - (a.views || 0),
+    new: (a, b) => ((b.bumpedAt || b.createdAt) > (a.bumpedAt || a.createdAt) ? 1 : -1),
+  };
+  const cmp = byField[sort] || byField.new;
+  const nowF = Date.now();
+  const isFeatured = (l) => l.featured && (!l.featuredUntil || new Date(l.featuredUntil).getTime() >= nowF);
+  // Виділені (преміум) завжди вище, всередині груп — за обраним сортуванням.
+  // Виняток: коли явно сортуємо за ціною, не перемішуємо порядок цін.
+  if (sort === 'cheap' || sort === 'expensive') items.sort(cmp);
+  else items.sort((a, b) => (isFeatured(b) - isFeatured(a)) || cmp(a, b));
 
   const page = Math.max(1, Number(params.get('page')) || 1);
   const perPage = Math.min(48, Math.max(1, Number(params.get('perPage')) || 24));
@@ -717,6 +768,7 @@ function notifyNewMessage(newMsg) {
 
 async function sendMessage(body, user) {
   if (!user) return { status: 401, body: { error: 'Увійдіть, щоб писати повідомлення.' } };
+  if (user.banned) return { status: 403, body: { error: 'Ваш акаунт заблоковано.' } };
   const listing = DB.listings.find((x) => x.id === body.listingId);
   if (!listing) return { status: 404, body: { error: 'Оголошення не знайдено.' } };
   if (!listing.userId) return { status: 400, body: { error: 'У цього оголошення немає зареєстрованого власника. Скористайтеся телефоном/WhatsApp.' } };
@@ -940,6 +992,198 @@ async function performPasswordReset(body) {
  * Адмін / модерація
  * ------------------------------------------------------------------------- */
 
+/* ----------------------------------------------------------------------------
+ * Аналітика подій
+ * ------------------------------------------------------------------------- */
+
+const EVENT_TYPES = new Set(['view', 'contact_phone', 'contact_whatsapp', 'contact_telegram', 'chat_open', 'save', 'search']);
+const MAX_EVENTS = 50000; // кільцевий буфер, щоб файл не ріс безмежно
+
+// Реєструє подію + інкрементує агрегат на оголошенні (швидке читання).
+function trackEvent(type, { listingId, userId } = {}) {
+  if (!EVENT_TYPES.has(type)) return;
+  DB.events.push({ id: uid(12), type, listingId: listingId || null, userId: userId || null, ts: Date.now() });
+  if (DB.events.length > MAX_EVENTS) DB.events.splice(0, DB.events.length - MAX_EVENTS);
+
+  if (listingId) {
+    const l = DB.listings.find((x) => x.id === listingId);
+    if (l) {
+      l.stats ||= { views: 0, contactClicks: 0, chatClicks: 0, saves: 0 };
+      if (type === 'view') { l.stats.views++; l.views = (l.views || 0) + 1; }
+      else if (type === 'chat_open') l.stats.chatClicks++;
+      else if (type === 'save') l.stats.saves++;
+      else if (type.startsWith('contact_')) l.stats.contactClicks++;
+    }
+  }
+  saveDB();
+}
+
+// Часовий ряд за N днів для адмін-дашборда.
+function analyticsSeries(days = 14) {
+  const dayMs = 86400000;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const start = today.getTime() - (days - 1) * dayMs;
+  const buckets = Array.from({ length: days }, (_, i) => ({
+    date: new Date(start + i * dayMs).toISOString().slice(0, 10),
+    views: 0, contacts: 0, newListings: 0, newUsers: 0,
+  }));
+  const idx = (ts) => Math.floor((ts - start) / dayMs);
+  for (const e of DB.events) {
+    const i = idx(e.ts);
+    if (i < 0 || i >= days) continue;
+    if (e.type === 'view') buckets[i].views++;
+    else if (e.type.startsWith('contact_')) buckets[i].contacts++;
+  }
+  for (const l of DB.listings) {
+    const i = idx(new Date(l.createdAt).getTime());
+    if (i >= 0 && i < days) buckets[i].newListings++;
+  }
+  for (const u of DB.users) {
+    const i = idx(new Date(u.createdAt).getTime());
+    if (i >= 0 && i < days) buckets[i].newUsers++;
+  }
+  return buckets;
+}
+
+/* ----------------------------------------------------------------------------
+ * Монетизація: замовлення та преміум-розміщення
+ * ------------------------------------------------------------------------- */
+
+function publicOrder(o) {
+  return { id: o.id, listingId: o.listingId, plan: o.plan, amount: o.amount, currency: o.currency, status: o.status, createdAt: o.createdAt, paidAt: o.paidAt || null };
+}
+
+// Створює замовлення на преміум для оголошення (повертає інструкції до оплати).
+async function createOrder(body, user) {
+  if (!user) return { status: 401, body: { error: 'Увійдіть, щоб придбати розміщення.' } };
+  const plan = PLANS[body.plan];
+  if (!plan) return { status: 400, body: { error: 'Невідомий тариф.' } };
+  const l = DB.listings.find((x) => x.id === body.listingId);
+  if (!l) return { status: 404, body: { error: 'Оголошення не знайдено.' } };
+  if (l.userId !== user.id && !isAdmin(user)) return { status: 403, body: { error: 'Це не ваше оголошення.' } };
+
+  const order = {
+    id: uid(14), userId: user.id, listingId: l.id, plan: body.plan,
+    amount: plan.amount, currency: 'GBP', status: 'pending', createdAt: new Date().toISOString(),
+  };
+  DB.orders.push(order);
+  await saveDB();
+  // Точка інтеграції платіжного провайдера (Stripe Checkout тощо).
+  // Тут повертаємо "ручний" режим: підтвердження через /api/orders/:id/confirm.
+  return { status: 201, body: { order: publicOrder(order), plan: { ...plan, key: body.plan } } };
+}
+
+// Застосовує ефект тарифу до оголошення.
+function applyPlan(listing, planKey) {
+  const plan = PLANS[planKey];
+  if (!plan) return;
+  const now = Date.now();
+  if (plan.featured) {
+    listing.featured = true;
+    const base = listing.featuredUntil && new Date(listing.featuredUntil).getTime() > now
+      ? new Date(listing.featuredUntil).getTime() : now;
+    listing.featuredUntil = new Date(base + plan.days * 86400000).toISOString();
+  }
+  if (plan.bump || plan.featured) {
+    listing.bumpedAt = new Date().toISOString();
+    listing.expiresAt = new Date(now + LISTING_TTL).toISOString();
+    if (listing.status === 'expired') listing.status = 'active';
+  }
+}
+
+// Підтвердження оплати. PAYMENTS_AUTO_CONFIRM=1 (демо) дозволяє самопідтвердження
+// власником; інакше підтверджує лише адмін (або реальний платіжний вебхук).
+async function confirmOrder(id, user) {
+  const order = DB.orders.find((o) => o.id === id);
+  if (!order) return { status: 404, body: { error: 'Замовлення не знайдено.' } };
+  const owner = order.userId === (user && user.id);
+  const allowed = isAdmin(user) || (owner && process.env.PAYMENTS_AUTO_CONFIRM === '1');
+  if (!allowed) return { status: 403, body: { error: 'Оплату підтверджує адміністратор.' } };
+  if (order.status === 'paid') return { status: 200, body: { order: publicOrder(order) } };
+
+  order.status = 'paid';
+  order.paidAt = new Date().toISOString();
+  const l = DB.listings.find((x) => x.id === order.listingId);
+  if (l) applyPlan(l, order.plan);
+  await saveDB();
+  return { status: 200, body: { order: publicOrder(order), listing: l ? publicListing(l) : null } };
+}
+
+function listMyOrders(user) {
+  if (!user) return { status: 401, body: { error: 'Увійдіть.' } };
+  const orders = DB.orders.filter((o) => o.userId === user.id)
+    .sort((a, b) => (b.createdAt > a.createdAt ? 1 : -1)).map(publicOrder);
+  return { status: 200, body: { orders } };
+}
+
+function revenueStats() {
+  const paid = DB.orders.filter((o) => o.status === 'paid');
+  const total = paid.reduce((s, o) => s + o.amount, 0);
+  const dayAgo = Date.now() - 86400000;
+  const monthAgo = Date.now() - 30 * 86400000;
+  return {
+    ordersTotal: DB.orders.length,
+    ordersPaid: paid.length,
+    ordersPending: DB.orders.filter((o) => o.status === 'pending').length,
+    revenueTotal: total,
+    revenue24h: paid.filter((o) => new Date(o.paidAt).getTime() > dayAgo).reduce((s, o) => s + o.amount, 0),
+    revenue30d: paid.filter((o) => new Date(o.paidAt).getTime() > monthAgo).reduce((s, o) => s + o.amount, 0),
+    currency: 'GBP',
+  };
+}
+
+/* ----------------------------------------------------------------------------
+ * Журнал дій адміна (audit log)
+ * ------------------------------------------------------------------------- */
+
+function audit(adminId, action, target) {
+  DB.audit.push({ id: uid(12), adminId, action, target: target || null, ts: Date.now() });
+  if (DB.audit.length > 5000) DB.audit.splice(0, DB.audit.length - 5000);
+}
+
+/* ----------------------------------------------------------------------------
+ * Управління користувачами (адмін)
+ * ------------------------------------------------------------------------- */
+
+function adminUserView(u) {
+  return {
+    id: u.id, name: u.name, email: u.email, city: u.city || '',
+    createdAt: u.createdAt, isAdmin: isAdmin(u), banned: !!u.banned,
+    listings: DB.listings.filter((l) => l.userId === u.id).length,
+  };
+}
+
+function adminListUsers(params) {
+  const q = (params.get('q') || '').trim().toLowerCase();
+  let users = DB.users.slice().sort((a, b) => (b.createdAt > a.createdAt ? 1 : -1));
+  if (q) users = users.filter((u) => (u.name + ' ' + u.email + ' ' + (u.city || '')).toLowerCase().includes(q));
+  return { status: 200, body: { users: users.slice(0, 200).map(adminUserView) } };
+}
+
+async function adminUpdateUser(id, body, admin) {
+  const u = DB.users.find((x) => x.id === id);
+  if (!u) return { status: 404, body: { error: 'Користувача не знайдено.' } };
+  if (u.id === admin.id && (body.action === 'ban' || body.action === 'demote')) {
+    return { status: 400, body: { error: 'Не можна застосувати дію до себе.' } };
+  }
+  switch (body.action) {
+    case 'ban':
+      u.banned = true;
+      // Знімаємо активні оголошення з показу. Сесію лишаємо, але всі дії
+      // блокуються прапором banned (createListing/sendMessage перевіряють його),
+      // а повторний вхід заборонено в loginUser.
+      for (const l of DB.listings) if (l.userId === u.id && l.status === 'active') l.status = 'archived';
+      audit(admin.id, 'ban_user', u.id);
+      break;
+    case 'unban': u.banned = false; audit(admin.id, 'unban_user', u.id); break;
+    case 'promote': u.isAdmin = true; audit(admin.id, 'promote_user', u.id); break;
+    case 'demote': u.isAdmin = false; audit(admin.id, 'demote_user', u.id); break;
+    default: return { status: 400, body: { error: 'Невідома дія.' } };
+  }
+  await saveDB();
+  return { status: 200, body: { user: adminUserView(u) } };
+}
+
 function adminStats() {
   const now = Date.now();
   const dayAgo = now - 1000 * 60 * 60 * 24;
@@ -949,11 +1193,14 @@ function adminStats() {
     active: DB.listings.filter((l) => l.status === 'active').length,
     sold: DB.listings.filter((l) => l.status === 'sold').length,
     expired: DB.listings.filter((l) => l.status === 'expired').length,
+    featured: DB.listings.filter((l) => l.featured).length,
     users: DB.users.length,
+    banned: DB.users.filter((u) => u.banned).length,
     messages: DB.messages.length,
     reportsOpen: DB.reports.filter((r) => !r.resolved).length,
     reportsTotal: DB.reports.length,
     newListingsToday: newToday,
+    ...revenueStats(),
   };
 }
 
@@ -1005,6 +1252,8 @@ function adminBackup() {
     messages: DB.messages,
     reviews: DB.reviews,
     reports: DB.reports,
+    orders: DB.orders,
+    audit: DB.audit,
   };
 }
 
@@ -1146,11 +1395,28 @@ async function serveStatic(req, res, urlPath) {
     const ext = path.extname(filePath).toLowerCase();
     const type = MIME[ext] || 'application/octet-stream';
     const immutable = rel.startsWith('/uploads/') || rel.startsWith('/icons/');
-    res.writeHead(200, {
+
+    // ETag за розміром+часом зміни → умовні запити (304 Not Modified).
+    const etag = `"${stat.size.toString(16)}-${stat.mtimeMs.toString(16)}"`;
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, { ETag: etag });
+      return res.end();
+    }
+
+    const headers = {
       'Content-Type': type,
-      'Content-Length': stat.size,
       'Cache-Control': immutable ? 'public, max-age=31536000, immutable' : 'public, max-age=300',
-    });
+      ETag: etag,
+    };
+    // Стискаємо текстові ресурси на льоту, якщо клієнт підтримує gzip.
+    const compressible = /text\/|javascript|json|svg|manifest/.test(type);
+    if (compressible && GZIP_OK.get(res) && stat.size > 1024) {
+      const data = await fs.readFile(filePath);
+      const gz = zlib.gzipSync(data);
+      res.writeHead(200, { ...headers, 'Content-Encoding': 'gzip', 'Content-Length': gz.length, Vary: 'Accept-Encoding' });
+      return res.end(gz);
+    }
+    res.writeHead(200, { ...headers, 'Content-Length': stat.size });
     fssync.createReadStream(filePath).pipe(res);
   } catch {
     if (!path.extname(rel)) {
@@ -1250,14 +1516,26 @@ async function handleApi(req, res, url) {
     /* ---- Оголошення ---- */
     if (resource === 'listings') {
       const id = parts[2];
+
+      // Статистика оголошення для власника: /api/listings/:id/stats
+      if (id && parts[3] === 'stats' && req.method === 'GET') {
+        const l = DB.listings.find((x) => x.id === id);
+        if (!l) return send(res, 404, { error: 'Оголошення не знайдено.' });
+        const tok = url.searchParams.get('token');
+        const owner = (user && l.userId === user.id) || isAdmin(user) ||
+          (tok && l.editTokenHash && sha256(tok) === l.editTokenHash);
+        if (!owner) return send(res, 403, { error: 'Немає доступу до статистики.' });
+        return send(res, 200, { stats: l.stats || {}, featured: !!l.featured, featuredUntil: l.featuredUntil || null, views: l.views || 0 });
+      }
+
       if (req.method === 'GET' && !id) {
         return send(res, 200, queryListings(url.searchParams, user));
       }
       if (req.method === 'GET' && id) {
         const l = DB.listings.find((x) => x.id === id);
         if (!l) return send(res, 404, { error: 'Оголошення не знайдено.' });
-        l.views = (l.views || 0) + 1;
-        saveDB();
+        // Перегляд рахуємо як подію (агрегат + часовий ряд).
+        trackEvent('view', { listingId: id, userId: user ? user.id : null });
         return send(res, 200, { listing: publicListing(l) });
       }
       if (req.method === 'POST' && !id) {
@@ -1312,13 +1590,41 @@ async function handleApi(req, res, url) {
       return send(res, r.status, r.body);
     }
 
-    /* ---- Адмін / модерація ---- */
+    /* ---- Аналітика: трекінг подій ---- */
+    if (resource === 'events' && req.method === 'POST') {
+      const body = await readBody(req).catch(() => ({}));
+      if (rateLimit('evt:' + clientIp(req), 240, 60 * 1000)) {
+        trackEvent(String(body.type || ''), { listingId: body.listingId, userId: user ? user.id : null });
+      }
+      return send(res, 202, { ok: true });
+    }
+
+    /* ---- Монетизація: тарифи та замовлення ---- */
+    if (resource === 'plans' && req.method === 'GET') {
+      return send(res, 200, { plans: PLANS, freeQuota: FREE_LISTING_QUOTA }, { 'Cache-Control': 'public, max-age=3600' });
+    }
+    if (resource === 'orders') {
+      const oid = parts[2];
+      if (req.method === 'GET' && !oid) { const r = listMyOrders(user); return send(res, r.status, r.body); }
+      if (req.method === 'POST' && !oid) {
+        const r = await createOrder(await readBody(req), user);
+        return send(res, r.status, r.body);
+      }
+      if (req.method === 'POST' && oid && parts[3] === 'confirm') {
+        const r = await confirmOrder(oid, user);
+        return send(res, r.status, r.body);
+      }
+    }
+
+    /* ---- Адмін / модерація / управління / аналітика ---- */
     if (resource === 'admin') {
       if (!isAdmin(user)) return send(res, 403, { error: 'Доступ лише для адміністратора.' });
       const sub = parts[2];
 
-      if (req.method === 'GET' && sub === 'stats') {
-        return send(res, 200, adminStats());
+      if (req.method === 'GET' && sub === 'stats') return send(res, 200, adminStats());
+      if (req.method === 'GET' && sub === 'analytics') {
+        const days = Math.min(60, Math.max(7, Number(url.searchParams.get('days')) || 14));
+        return send(res, 200, { series: analyticsSeries(days) });
       }
       if (req.method === 'GET' && sub === 'reports') {
         const r = adminReports(url.searchParams);
@@ -1326,11 +1632,30 @@ async function handleApi(req, res, url) {
       }
       if (req.method === 'POST' && sub === 'reports' && parts[3]) {
         const r = await resolveReport(parts[3], await readBody(req));
+        audit(user.id, 'resolve_report', parts[3]);
         return send(res, r.status, r.body);
       }
       if (req.method === 'DELETE' && sub === 'listings' && parts[3]) {
         const r = await adminDeleteListing(parts[3]);
+        audit(user.id, 'delete_listing', parts[3]);
         return send(res, r.status, r.body);
+      }
+      // Управління користувачами
+      if (req.method === 'GET' && sub === 'users') {
+        const r = adminListUsers(url.searchParams);
+        return send(res, r.status, r.body);
+      }
+      if (req.method === 'POST' && sub === 'users' && parts[3]) {
+        const r = await adminUpdateUser(parts[3], await readBody(req), user);
+        return send(res, r.status, r.body);
+      }
+      // Замовлення (усі) + ручне підтвердження
+      if (req.method === 'GET' && sub === 'orders') {
+        return send(res, 200, { orders: DB.orders.slice().sort((a, b) => (b.createdAt > a.createdAt ? 1 : -1)).map(publicOrder) });
+      }
+      // Журнал дій
+      if (req.method === 'GET' && sub === 'audit') {
+        return send(res, 200, { audit: DB.audit.slice(-200).reverse() });
       }
       // Бекап усієї бази (без паролів/токенів) — для збереження адміном.
       if (req.method === 'GET' && sub === 'backup') {
@@ -1413,7 +1738,7 @@ const server = http.createServer(async (req, res) => {
 
 loadDB().then(() => {
   // Періодично прибираємо прострочені оголошення (раз на годину).
-  setInterval(expireListings, 60 * 60 * 1000).unref?.();
+  setInterval(() => { expireListings(); expireFeatured(); }, 60 * 60 * 1000).unref?.();
 
   server.listen(PORT, HOST, () => {
     console.log(`\n  ОголошенняUK ▸ http://localhost:${PORT}`);

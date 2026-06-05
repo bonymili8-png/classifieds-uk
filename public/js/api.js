@@ -73,11 +73,32 @@ export const api = {
   // -- Скарги --
   report(listingId, reason, text) { return request('/api/reports', { method: 'POST', body: JSON.stringify({ listingId, reason, text }) }); },
 
+  // -- Аналітика (трекінг подій, "fire-and-forget") --
+  track(type, listingId) {
+    try {
+      const body = JSON.stringify({ type, listingId });
+      if (navigator.sendBeacon) navigator.sendBeacon('/api/events', new Blob([body], { type: 'application/json' }));
+      else fetch('/api/events', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true });
+    } catch { /* аналітика не критична */ }
+  },
+  listingStats(id, token) { return request('/api/listings/' + encodeURIComponent(id) + '/stats' + (token ? '?token=' + encodeURIComponent(token) : '')); },
+
+  // -- Монетизація --
+  plans() { return request('/api/plans'); },
+  myOrders() { return request('/api/orders'); },
+  createOrder(listingId, plan) { return request('/api/orders', { method: 'POST', body: JSON.stringify({ listingId, plan }) }); },
+  confirmOrder(id) { return request('/api/orders/' + encodeURIComponent(id) + '/confirm', { method: 'POST' }); },
+
   // -- Адмін --
   adminStats() { return request('/api/admin/stats'); },
+  adminAnalytics(days = 14) { return request('/api/admin/analytics?days=' + days); },
   adminReports(resolved = false) { return request('/api/admin/reports' + (resolved ? '?resolved=1' : '')); },
   adminResolveReport(id, resolved = true) { return request('/api/admin/reports/' + encodeURIComponent(id), { method: 'POST', body: JSON.stringify({ resolved }) }); },
   adminDeleteListing(id) { return request('/api/admin/listings/' + encodeURIComponent(id), { method: 'DELETE' }); },
+  adminUsers(q = '') { return request('/api/admin/users' + (q ? '?q=' + encodeURIComponent(q) : '')); },
+  adminUserAction(id, action) { return request('/api/admin/users/' + encodeURIComponent(id), { method: 'POST', body: JSON.stringify({ action }) }); },
+  adminOrders() { return request('/api/admin/orders'); },
+  adminAudit() { return request('/api/admin/audit'); },
   adminBackupUrl() { return '/api/admin/backup' + (session.token ? '?token=' + encodeURIComponent(session.token) : ''); },
 };
 

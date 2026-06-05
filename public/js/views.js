@@ -1,7 +1,7 @@
 // Рендер екранів. Кожен експорт має render(ctx) і опційно mount(root, ctx).
 
 import { api, store, session } from './api.js';
-import { CATEGORIES, CITIES, sorts, catLabel, formatPrice, timeAgo, esc } from './data.js';
+import { CATEGORIES, CITIES, sorts, catLabel, formatPrice, formatPence, timeAgo, esc } from './data.js';
 import { t } from './i18n.js';
 import { attrFieldLabel, attrValueLabel, attrSummary } from './attributes.js';
 
@@ -18,7 +18,8 @@ export function cardHTML(l) {
   const sold = l.status === 'sold';
   const chips = attrSummary(l.category, l.attributes).slice(0, 3);
   return `
-  <article class="card ${sold ? 'is-sold' : ''}">
+  <article class="card ${sold ? 'is-sold' : ''} ${l.featured ? 'is-featured' : ''}">
+    ${l.featured ? `<span class="feat-badge">★ ${esc(t('feat.badge'))}</span>` : ''}
     ${sold ? `<span class="sold-badge">${esc(t('detail.sold'))}</span>` : ''}
     <div class="card-top">
       <a class="card-cat" href="#/c/${l.category}" data-link>${esc(catLabel(l.category))}</a>
@@ -283,11 +284,11 @@ export const DetailView = {
       const phoneDigits = (l.phone || '').replace(/[^\d+]/g, '');
       const waDigits = (l.whatsapp || '').replace(/[^\d]/g, '');
       const contacts = [];
-      if (l.phone) contacts.push(`<a class="contact-btn c-call" href="tel:${esc(phoneDigits)}">
+      if (l.phone) contacts.push(`<a class="contact-btn c-call" data-track="contact_phone" href="tel:${esc(phoneDigits)}">
         <span class="ic">📞</span><span>${esc(t('detail.call'))}<small class="phone-reveal">${esc(l.phone)}</small></span></a>`);
-      if (waDigits) contacts.push(`<a class="contact-btn c-wa" href="https://wa.me/${esc(waDigits)}" target="_blank" rel="noopener">
+      if (waDigits) contacts.push(`<a class="contact-btn c-wa" data-track="contact_whatsapp" href="https://wa.me/${esc(waDigits)}" target="_blank" rel="noopener">
         <span class="ic">💬</span><span>WhatsApp<small>${esc(l.whatsapp)}</small></span></a>`);
-      if (l.telegram) contacts.push(`<a class="contact-btn c-tg" href="https://t.me/${esc(l.telegram)}" target="_blank" rel="noopener">
+      if (l.telegram) contacts.push(`<a class="contact-btn c-tg" data-track="contact_telegram" href="https://t.me/${esc(l.telegram)}" target="_blank" rel="noopener">
         <span class="ic">✈️</span><span>Telegram<small>@${esc(l.telegram)}</small></span></a>`);
       if (l.owner && !isOwner) contacts.push(`<button class="contact-btn c-msg" id="msgBtn">
         <span class="ic">✉️</span><span>${esc(t('detail.message'))}<small>${esc(l.owner.name)}</small></span></button>`);
@@ -338,14 +339,18 @@ export const DetailView = {
           ${isOwner ? `<div class="detail-card">
             <h2 class="dc-title">${esc(t('detail.manage'))}</h2>
             ${expiryText(l) ? `<p class="expiry-note ${l.status === 'expired' ? 'is-expired' : ''}">⏳ ${esc(expiryText(l))}</p>` : ''}
+            ${l.featured ? `<p class="expiry-note" style="color:var(--accent)">★ ${esc(t('feat.active', { d: new Date(l.featuredUntil).toLocaleDateString() }))}</p>` : ''}
             <div class="row-gap">
               <a class="btn" href="#/edit/${l.id}" data-link>✏️ ${esc(t('common.edit'))}</a>
               ${l.status === 'sold'
                 ? `<button class="btn" id="statusBtn" data-status="active">${esc(t('detail.markActive'))}</button>`
                 : `<button class="btn" id="statusBtn" data-status="sold">${esc(t('detail.markSold'))}</button>`}
               <button class="btn" id="bumpBtn">⤴ ${l.status === 'expired' ? esc(t('expiry.renew')) : esc(t('detail.bump'))}</button>
+              <button class="btn btn-primary" id="promoteBtn">${esc(t('feat.promote'))}</button>
               <button class="btn btn-danger" id="delBtn">🗑️ ${esc(t('common.delete'))}</button>
-            </div></div>` : ''}
+            </div>
+            <div id="ownerStats" class="owner-stats"></div>
+          </div>` : ''}
         </div>
       </div>
 
@@ -383,8 +388,13 @@ export const DetailView = {
 
       el.querySelector('#reportBtn').addEventListener('click', () => openReport(l.id, ctx));
 
+      // Трекінг кліків по контактах (аналітика).
+      el.querySelectorAll('[data-track]').forEach((btn) => btn.addEventListener('click', () => {
+        api.track(btn.dataset.track, l.id);
+      }));
+
       const msgBtn = el.querySelector('#msgBtn');
-      if (msgBtn) msgBtn.addEventListener('click', () => openMessageComposer(l, ctx));
+      if (msgBtn) msgBtn.addEventListener('click', () => { api.track('chat_open', l.id); openMessageComposer(l, ctx); });
 
       const statusBtn = el.querySelector('#statusBtn');
       if (statusBtn) statusBtn.addEventListener('click', async () => {
@@ -401,6 +411,21 @@ export const DetailView = {
           render();
         } catch (e) { ctx.toast(e.message); }
       });
+      const promoteBtn = el.querySelector('#promoteBtn');
+      if (promoteBtn) promoteBtn.addEventListener('click', () => openPromote(l, ctx));
+
+      // Статистика для власника.
+      const ownerStatsBox = el.querySelector('#ownerStats');
+      if (ownerStatsBox) {
+        api.listingStats(l.id, store.tokenFor(l.id)).then(({ stats }) => {
+          ownerStatsBox.innerHTML = `<div class="stat-row">
+            <span title="${esc(t('stat.views'))}">👁️ ${stats.views || 0}</span>
+            <span title="${esc(t('stat.contacts'))}">📞 ${stats.contactClicks || 0}</span>
+            <span title="${esc(t('stat.chats'))}">✉️ ${stats.chatClicks || 0}</span>
+            <span title="${esc(t('stat.saves'))}">★ ${stats.saves || 0}</span>
+          </div>`;
+        }).catch(() => {});
+      }
       const delBtn = el.querySelector('#delBtn');
       if (delBtn) delBtn.addEventListener('click', async () => {
         if (!confirm(t('common.delete') + '?')) return;
@@ -1060,12 +1085,30 @@ export const AdminView = {
 
       <div class="seg admin-tabs" id="adminTabs">
         <button class="seg-btn active" data-tab="stats">${esc(t('admin.tabStats'))}</button>
+        <button class="seg-btn" data-tab="analytics">${esc(t('admin.tabAnalytics'))}</button>
         <button class="seg-btn" data-tab="listings">${esc(t('admin.tabListings'))}</button>
+        <button class="seg-btn" data-tab="users">${esc(t('admin.tabUsers'))}</button>
+        <button class="seg-btn" data-tab="revenue">${esc(t('admin.tabRevenue'))}</button>
         <button class="seg-btn" data-tab="reports">${esc(t('admin.tabReports'))}</button>
       </div>
 
       <section data-pane="stats">
         <div class="admin-stats mt16" id="adminStats">${gridSkeleton(4)}</div>
+      </section>
+
+      <section data-pane="analytics" hidden>
+        <div id="adminAnalytics" class="mt16">${gridSkeleton(2)}</div>
+      </section>
+
+      <section data-pane="users" hidden>
+        <div class="toolbar mt16">
+          <input class="input" id="auQ" placeholder="${esc(t('admin.searchUsers'))}" style="flex:1;min-width:160px">
+        </div>
+        <div id="adminUsers" class="mt16">${gridSkeleton(3)}</div>
+      </section>
+
+      <section data-pane="revenue" hidden>
+        <div id="adminRevenue" class="mt16">${gridSkeleton(2)}</div>
       </section>
 
       <section data-pane="listings" hidden>
@@ -1104,7 +1147,93 @@ export const AdminView = {
       root.querySelectorAll('[data-pane]').forEach((p) => { p.hidden = p.dataset.pane !== tab; });
       if (tab === 'listings') loadListings();
       if (tab === 'reports') loadReports();
+      if (tab === 'users') loadUsers();
+      if (tab === 'revenue') loadRevenue();
+      if (tab === 'analytics') loadAnalytics();
     }));
+
+    /* -------- Управління користувачами -------- */
+    let auTimer;
+    async function loadUsers() {
+      const box = root.querySelector('#adminUsers');
+      box.innerHTML = gridSkeleton(3);
+      try {
+        const { users } = await api.adminUsers(root.querySelector('#auQ').value.trim());
+        if (!users.length) { box.innerHTML = emptyHTML(t('empty.title'), ''); return; }
+        box.innerHTML = `<div class="admin-listing-list">${users.map((u) => `
+          <div class="al-row ${u.banned ? 'is-banned' : ''}">
+            <div class="al-main">
+              <a href="#/u/${u.id}" data-link class="al-title">${esc(u.name)} ${u.isAdmin ? '🛡️' : ''} ${u.banned ? `<span class="status-pill status-sold">${esc(t('admin.banned'))}</span>` : ''}</a>
+              <div class="al-meta muted">${esc(u.email)} · ${u.listings} 📦 · ${esc(timeAgo(u.createdAt))}</div>
+            </div>
+            <div class="al-actions">
+              ${u.banned
+                ? `<button class="btn btn-sm" data-uact="unban" data-uid="${u.id}">${esc(t('admin.unban'))}</button>`
+                : `<button class="btn btn-sm btn-danger" data-uact="ban" data-uid="${u.id}">${esc(t('admin.ban'))}</button>`}
+              ${u.isAdmin
+                ? `<button class="btn btn-sm" data-uact="demote" data-uid="${u.id}">${esc(t('admin.demote'))}</button>`
+                : `<button class="btn btn-sm" data-uact="promote" data-uid="${u.id}">${esc(t('admin.promote'))}</button>`}
+            </div>
+          </div>`).join('')}</div>`;
+        box.querySelectorAll('[data-uact]').forEach((btn) => btn.addEventListener('click', async () => {
+          if (btn.dataset.uact === 'ban' && !confirm(t('admin.ban') + '?')) return;
+          try { await api.adminUserAction(btn.dataset.uid, btn.dataset.uact); ctx.toast(t('admin.userActed')); loadUsers(); loadStats(); }
+          catch (e) { ctx.toast(e.message); }
+        }));
+      } catch (e) { box.innerHTML = `<div class="alert alert-error">${esc(e.message)}</div>`; }
+    }
+
+    /* -------- Дохід / замовлення -------- */
+    async function loadRevenue() {
+      const box = root.querySelector('#adminRevenue');
+      box.innerHTML = gridSkeleton(2);
+      try {
+        const s = await api.adminStats();
+        const { orders } = await api.adminOrders();
+        const tiles = [
+          ['admin.statRevenue', formatPence(s.revenueTotal)],
+          ['admin.statRevenue30', formatPence(s.revenue30d)],
+          ['admin.statOrders', s.ordersPaid + '/' + s.ordersTotal],
+          ['admin.statFeatured', s.featured],
+        ];
+        box.innerHTML = `<div class="admin-stats">${tiles.map(([k, v]) =>
+          `<div class="stat-tile"><div class="stat-n">${v}</div><div class="stat-l">${esc(t(k))}</div></div>`).join('')}</div>
+          <div class="admin-listing-list mt16">${orders.slice(0, 50).map((o) => `
+            <div class="al-row">
+              <div class="al-main">
+                <a href="#/l/${o.listingId}" data-link class="al-title">${esc(o.plan)} · ${esc(formatPence(o.amount))}</a>
+                <div class="al-meta muted">${esc(timeAgo(o.createdAt))} <span class="status-pill ${o.status === 'paid' ? 'status-active' : 'status-archived'}">${esc(o.status)}</span></div>
+              </div>
+            </div>`).join('') || emptyHTML(t('empty.title'), '')}</div>`;
+      } catch (e) { box.innerHTML = `<div class="alert alert-error">${esc(e.message)}</div>`; }
+    }
+
+    /* -------- Аналітика (часовий ряд) -------- */
+    async function loadAnalytics() {
+      const box = root.querySelector('#adminAnalytics');
+      box.innerHTML = gridSkeleton(2);
+      try {
+        const { series } = await api.adminAnalytics(14);
+        const maxV = Math.max(1, ...series.map((d) => Math.max(d.views, d.contacts, d.newListings)));
+        box.innerHTML = `<div class="analytics-chart">${series.map((d) => {
+          const h = (v) => Math.round((v / maxV) * 100);
+          return `<div class="chart-col" title="${d.date}: 👁️${d.views} 📞${d.contacts} 📦${d.newListings}">
+            <div class="bars">
+              <span class="bar bar-views" style="height:${h(d.views)}%"></span>
+              <span class="bar bar-contacts" style="height:${h(d.contacts)}%"></span>
+              <span class="bar bar-new" style="height:${h(d.newListings)}%"></span>
+            </div>
+            <div class="chart-label">${d.date.slice(5)}</div>
+          </div>`;
+        }).join('')}</div>
+        <div class="chart-legend">
+          <span><i class="bar-views"></i> ${esc(t('admin.revViews'))}</span>
+          <span><i class="bar-contacts"></i> ${esc(t('admin.revContacts'))}</span>
+          <span><i class="bar-new"></i> ${esc(t('admin.tabListings'))}</span>
+        </div>`;
+      } catch (e) { box.innerHTML = `<div class="alert alert-error">${esc(e.message)}</div>`; }
+    }
+    root.querySelector('#auQ').addEventListener('input', () => { clearTimeout(auTimer); auTimer = setTimeout(loadUsers, 350); });
 
     /* -------- Управління оголошеннями -------- */
     let alPage = 1;
@@ -1174,8 +1303,10 @@ export const AdminView = {
         const tiles = [
           ['admin.statListings', s.listings], ['admin.statActive', s.active],
           ['admin.statSold', s.sold], ['admin.statExpired', s.expired ?? 0],
-          ['admin.statUsers', s.users], ['admin.statMessages', s.messages],
+          ['admin.statFeatured', s.featured ?? 0], ['admin.statUsers', s.users],
+          ['admin.statBanned', s.banned ?? 0], ['admin.statMessages', s.messages],
           ['admin.statReports', s.reportsOpen], ['admin.statToday', s.newListingsToday],
+          ['admin.statRevenue', formatPence(s.revenueTotal ?? 0)], ['admin.statOrders', s.ordersPaid ?? 0],
         ];
         root.querySelector('#adminStats').innerHTML = tiles.map(([k, v]) =>
           `<div class="stat-tile"><div class="stat-n">${v}</div><div class="stat-l">${esc(t(k))}</div></div>`).join('');
@@ -1314,6 +1445,52 @@ function openMessageComposer(listing, ctx) {
       close(); ctx.toast(t('common.send') + ' ✓');
       location.hash = '#/chat/' + message.threadId;
     } catch (e) { ctx.toast(e.message); }
+  });
+}
+
+// Модалка просування оголошення (монетизація).
+async function openPromote(listing, ctx) {
+  if (!session.isAuthed) { ctx.toast(t('auth.needLogin')); location.hash = '#/login'; return; }
+  let plans = {};
+  try { ({ plans } = await api.plans()); } catch { ctx.toast('⚠️'); return; }
+
+  const items = Object.entries(plans).map(([key, p]) => `
+    <label class="plan-option">
+      <input type="radio" name="plan" value="${esc(key)}">
+      <span class="plan-body">
+        <b>${esc(p.label)}</b>
+        <span class="plan-price">${esc(formatPence(p.amount))}</span>
+      </span>
+    </label>`).join('');
+
+  const { back, close } = modal(`
+    <h2 style="margin:0 0 6px">${esc(t('feat.title'))}</h2>
+    <p class="muted" style="margin:0 0 14px">${esc(t('feat.choose'))}</p>
+    <div class="plan-list">${items}</div>
+    <p class="hint mt16">${esc(t('feat.payNote'))}</p>
+    <div class="row-gap mt16">
+      <button class="btn btn-ghost" id="pmCancel">${esc(t('common.cancel'))}</button>
+      <button class="btn btn-primary" id="pmBuy" disabled>${esc(t('feat.buy'))}</button>
+    </div>`);
+
+  back.querySelectorAll('input[name="plan"]').forEach((r) =>
+    r.addEventListener('change', () => { back.querySelector('#pmBuy').disabled = false; }));
+  back.querySelector('#pmCancel').addEventListener('click', close);
+  back.querySelector('#pmBuy').addEventListener('click', async () => {
+    const chosen = back.querySelector('input[name="plan"]:checked');
+    if (!chosen) return;
+    const btn = back.querySelector('#pmBuy'); btn.disabled = true;
+    try {
+      const { order } = await api.createOrder(listing.id, chosen.value);
+      // Демо/self-host: одразу підтверджуємо (реальний потік — редірект на платіжку).
+      await api.confirmOrder(order.id);
+      ctx.toast(t('feat.paySucceeded'));
+      close();
+      render();
+    } catch (e) {
+      ctx.toast(e.message);
+      btn.disabled = false;
+    }
   });
 }
 

@@ -498,3 +498,32 @@ label.lbl .req { color: var(--danger); }
 
 .expiry-note { font-size: .85rem; color: var(--muted); margin: 0 0 12px; }
 .expiry-note.is-expired { color: var(--danger); font-weight: 600; }
+
+/* -------- Монетизація: виділені оголошення -------- */
+.card.is-featured { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent), var(--shadow-sm); }
+.feat-badge { position: absolute; top: 10px; left: 10px; z-index: 2; background: linear-gradient(135deg, #f5a623, #f7c948);
+  color: #3a2c00; font-size: .68rem; font-weight: 800; padding: 4px 9px; border-radius: var(--r-pill); box-shadow: var(--shadow-sm); }
+
+.plan-list { display: flex; flex-direction: column; gap: 10px; }
+.plan-option { display: flex; align-items: center; gap: 12px; padding: 14px; border: 1px solid var(--border);
+  border-radius: var(--r-md); cursor: pointer; transition: border-color .15s, background .15s; }
+.plan-option:has(input:checked) { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 8%, transparent); }
+.plan-body { display: flex; align-items: center; justify-content: space-between; flex: 1; gap: 12px; }
+.plan-price { font-weight: 800; font-size: 1.1rem; color: var(--primary); }
+
+/* -------- Статистика власника -------- */
+.owner-stats { margin-top: 12px; }
+.stat-row { display: flex; gap: 16px; flex-wrap: wrap; font-weight: 600; color: var(--muted); font-size: .95rem; }
+
+/* -------- Адмін: користувачі / дохід / аналітика -------- */
+.al-row.is-banned { opacity: .65; }
+.analytics-chart { display: flex; align-items: flex-end; gap: 6px; height: 200px; padding: 12px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--r-md); overflow-x: auto; }
+.chart-col { flex: 1; min-width: 28px; display: flex; flex-direction: column; align-items: center; gap: 6px; height: 100%; }
+.chart-col .bars { flex: 1; display: flex; align-items: flex-end; gap: 2px; width: 100%; justify-content: center; }
+.bars .bar { width: 7px; border-radius: 3px 3px 0 0; min-height: 2px; transition: height .3s; }
+.bar-views { background: var(--primary); } .bar-contacts { background: var(--accent); } .bar-new { background: var(--success); }
+.chart-label { font-size: .62rem; color: var(--muted-2); white-space: nowrap; }
+.chart-legend { display: flex; gap: 16px; margin-top: 10px; font-size: .82rem; color: var(--muted); flex-wrap: wrap; }
+.chart-legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: middle; margin-right: 4px; }
+.chart-legend i.bar-views { background: var(--primary); } .chart-legend i.bar-contacts { background: var(--accent); } .chart-legend i.bar-new { background: var(--success); }

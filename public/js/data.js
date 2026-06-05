@@ -55,6 +55,11 @@ export function formatPrice(listing) {
   return '£' + str.replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
 }
 
+// Форматує суму в пенсах як £X.XX.
+export function formatPence(pence) {
+  return '£' + (Number(pence || 0) / 100).toFixed(2);
+}
+
 export function timeAgo(iso) {
   const d = new Date(iso);
   const s = Math.floor((Date.now() - d.getTime()) / 1000);

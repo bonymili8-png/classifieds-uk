@@ -1,7 +1,7 @@
 // Простий офлайн-кеш оболонки застосунку.
 // Стратегії: статика — cache-first; API — network-first (з фолбеком у кеш).
 
-const CACHE = 'ouk-v7';
+const CACHE = 'ouk-v8';
 const SHELL = [
   '/',
   '/index.html',

@@ -445,6 +445,149 @@ test('адмін видаляє будь-яке оголошення', async () 
   assert.equal(check.status, 404);
 });
 
+/* ============================ Аналітика ============================ */
+
+let analyticsListingId;
+
+test('подія перегляду інкрементує статистику оголошення', async () => {
+  const created = await req('POST', '/api/listings', {
+    token: tokenA,
+    body: { title: 'Аналітика айтем', description: 'Для перевірки лічильників.', category: 'goods', location: 'Hull', phone: '+447111002200', price: 5 },
+  });
+  analyticsListingId = created.json.listing.id;
+
+  await req('POST', '/api/events', { body: { type: 'contact_phone', listingId: analyticsListingId } });
+  await req('GET', '/api/listings/' + analyticsListingId); // це теж подія view
+
+  const { status, json } = await req('GET', `/api/listings/${analyticsListingId}/stats`, { token: tokenA });
+  assert.equal(status, 200);
+  assert.ok(json.stats.views >= 1, 'є перегляди');
+  assert.equal(json.stats.contactClicks, 1, 'клік по контакту враховано');
+});
+
+test('сторонній не бачить статистику чужого оголошення (403)', async () => {
+  const { status } = await req('GET', `/api/listings/${analyticsListingId}/stats`, { token: tokenB });
+  assert.equal(status, 403);
+});
+
+test('адмін-аналітика повертає часовий ряд', async () => {
+  const { status, json } = await req('GET', '/api/admin/analytics?days=14', { token: adminToken });
+  assert.equal(status, 200);
+  assert.equal(json.series.length, 14);
+  assert.ok('views' in json.series[0] && 'contacts' in json.series[0]);
+});
+
+/* ============================ Монетизація ============================ */
+
+let orderId, monetizeListingId;
+
+test('тарифи доступні публічно', async () => {
+  const { status, json } = await req('GET', '/api/plans');
+  assert.equal(status, 200);
+  assert.ok(json.plans.featured7, 'є тариф featured7');
+  assert.ok(json.freeQuota > 0);
+});
+
+test('створення замовлення на просування', async () => {
+  const created = await req('POST', '/api/listings', {
+    token: tokenA,
+    body: { title: 'Монетизація айтем', description: 'Перевірка преміум-просування.', category: 'goods', location: 'Hull', phone: '+447111003300', price: 50 },
+  });
+  monetizeListingId = created.json.listing.id;
+
+  const { status, json } = await req('POST', '/api/orders', {
+    token: tokenA, body: { listingId: monetizeListingId, plan: 'featured7' },
+  });
+  assert.equal(status, 201);
+  assert.equal(json.order.status, 'pending');
+  assert.equal(json.order.amount, 499);
+  orderId = json.order.id;
+});
+
+test('чуже оголошення не можна просувати (403)', async () => {
+  const { status } = await req('POST', '/api/orders', {
+    token: tokenB, body: { listingId: monetizeListingId, plan: 'featured7' },
+  });
+  assert.equal(status, 403);
+});
+
+test('адмін підтверджує оплату → оголошення стає featured', async () => {
+  const { status, json } = await req('POST', `/api/orders/${orderId}/confirm`, { token: adminToken });
+  assert.equal(status, 200);
+  assert.equal(json.order.status, 'paid');
+  assert.equal(json.listing.featured, true);
+});
+
+test('featured-оголошення піднімається вище у списку', async () => {
+  const { json } = await req('GET', '/api/listings?category=goods&sort=new');
+  const idx = json.items.findIndex((l) => l.id === monetizeListingId);
+  assert.ok(idx === 0, 'просунуте має бути першим');
+});
+
+test('дохід відображається в адмін-статистиці', async () => {
+  const { json } = await req('GET', '/api/admin/stats', { token: adminToken });
+  assert.ok(json.revenueTotal >= 499, 'дохід враховано');
+  assert.ok(json.ordersPaid >= 1);
+});
+
+/* ============================ Управління користувачами ============================ */
+
+test('адмін бачить список користувачів', async () => {
+  const { status, json } = await req('GET', '/api/admin/users', { token: adminToken });
+  assert.equal(status, 200);
+  assert.ok(json.users.length >= 2);
+  assert.ok(!('hash' in json.users[0]), 'без секретів');
+});
+
+test('бан користувача архівує його оголошення і блокує вхід', async () => {
+  // Окремий користувач для бану.
+  const reg = await req('POST', '/api/auth/register', { body: { name: 'Спамер', email: 'spam@test.dev', password: 'secret123' } });
+  const spamId = reg.json.user.id;
+  await req('POST', '/api/listings', { token: reg.json.token, body: { title: 'Спам оголошення', description: 'спам спам спам', category: 'other', location: 'X', phone: '+447111004400' } });
+
+  const ban = await req('POST', `/api/admin/users/${spamId}`, { token: adminToken, body: { action: 'ban' } });
+  assert.equal(ban.status, 200);
+  assert.equal(ban.json.user.banned, true);
+
+  // Вхід заблоковано.
+  const login = await req('POST', '/api/auth/login', { body: { email: 'spam@test.dev', password: 'secret123' } });
+  assert.equal(login.status, 403);
+});
+
+test('розбан повертає доступ', async () => {
+  const users = await req('GET', '/api/admin/users?q=spam', { token: adminToken });
+  const spam = users.json.users.find((u) => u.email === 'spam@test.dev');
+  await req('POST', `/api/admin/users/${spam.id}`, { token: adminToken, body: { action: 'unban' } });
+  const login = await req('POST', '/api/auth/login', { body: { email: 'spam@test.dev', password: 'secret123' } });
+  assert.equal(login.status, 200);
+});
+
+test('не-адмін не має доступу до управління користувачами (403)', async () => {
+  const { status } = await req('GET', '/api/admin/users', { token: tokenA });
+  assert.equal(status, 403);
+});
+
+test('журнал дій адміна фіксує бан', async () => {
+  const { status, json } = await req('GET', '/api/admin/audit', { token: adminToken });
+  assert.equal(status, 200);
+  assert.ok(json.audit.some((a) => a.action === 'ban_user'));
+});
+
+test('забанений користувач не може створити оголошення (403)', async () => {
+  // Окремий одноразовий користувач, щоб не зачіпати інші тести.
+  const reg = await req('POST', '/api/auth/register', { body: { name: 'Бан Тест', email: 'bantest@test.dev', password: 'secret123' } });
+  const token = reg.json.token;
+  const id = reg.json.user.id;
+  await req('POST', `/api/admin/users/${id}`, { token: adminToken, body: { action: 'ban' } });
+
+  // Сесію забаненого інвалідовано — створення відхиляється (401 або 403).
+  const create = await req('POST', '/api/listings', {
+    token,
+    body: { title: 'Спроба забаненого', description: 'не має пройти', category: 'goods', location: 'X', phone: '+447111005500' },
+  });
+  assert.ok(create.status === 403 || create.status === 401, 'забаненому заборонено');
+});
+
 /* ============================ Відгуки ============================ */
 
 test('покупець залишає відгук про продавця', async () => {

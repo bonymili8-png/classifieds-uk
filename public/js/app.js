@@ -188,6 +188,7 @@ document.addEventListener('click', (e) => {
     e.preventDefault();
     const on = store.toggleFav(fav.dataset.fav);
     fav.classList.toggle('on', on);
+    if (on) api.track('save', fav.dataset.fav);
     toast(on ? t('save.added') : t('save.add'));
   }
 });
