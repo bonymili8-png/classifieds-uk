@@ -31,6 +31,9 @@ Environment=ADMIN_EMAILS=you@example.com
 # Environment=SMTP_USER=no-reply@example.com
 # Environment=SMTP_PASS=secret
 # Environment=MAIL_FROM=ОголошенняUK <no-reply@example.com>
+# Платежі Stripe (необов'язково):
+# Environment=STRIPE_SECRET_KEY=sk_live_xxx
+# Environment=STRIPE_WEBHOOK_SECRET=whsec_xxx
 
 # Базове посилення безпеки.
 NoNewPrivileges=true

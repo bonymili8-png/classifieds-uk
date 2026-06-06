@@ -775,6 +775,7 @@ export const ProfileView = {
           <p class="muted">${u.city ? esc(u.city) + ' · ' : ''}${esc(t('profile.memberSince'))} ${esc(timeAgo(u.createdAt))}</p>
         </div>
         <div class="spacer"></div>
+        <a class="btn" href="#/orders" data-link>💳 ${esc(t('orders.title'))}</a>
         <button class="btn" id="editProfileBtn">⚙ ${esc(t('profile.settings'))}</button>
         <button class="btn btn-danger" id="logoutBtn">${esc(t('auth.logout'))}</button>
       </div>
@@ -825,6 +826,74 @@ export const ProfileView = {
         : emptyHTML(t('profile.myListings'), '', `<a class="btn btn-primary mt16" href="#/new" data-link>+ ${esc(t('nav.add'))}</a>`);
     } catch (e) {
       root.querySelector('#myGrid').innerHTML = `<div class="alert alert-error">${esc(e.message)}</div>`;
+    }
+  },
+};
+
+// Мої платежі / замовлення на просування
+export const OrdersView = {
+  async render() {
+    if (!session.isAuthed) { location.hash = '#/login'; return ''; }
+    return `<div class="container narrow">
+      <div class="section-head"><h2>💳 ${esc(t('orders.title'))}</h2></div>
+      <div id="ordersAlert"></div>
+      <div id="ordersList">${gridSkeleton(3)}</div>
+    </div>`;
+  },
+  async mount(root, ctx) {
+    if (!session.isAuthed) return;
+
+    // Повідомлення після повернення зі Stripe (?status=success|cancel).
+    const status = ctx.query.status;
+    if (status === 'success') {
+      root.querySelector('#ordersAlert').innerHTML = `<div class="alert alert-success">✓ ${esc(t('orders.paidOk'))}</div>`;
+    } else if (status === 'cancel') {
+      root.querySelector('#ordersAlert').innerHTML = `<div class="alert alert-info">${esc(t('orders.canceledNote'))}</div>`;
+    }
+
+    const box = root.querySelector('#ordersList');
+    try {
+      let plans = {};
+      try { ({ plans } = await api.plans()); } catch { /* не критично */ }
+      const { orders } = await api.myOrders();
+      if (!orders.length) {
+        box.innerHTML = emptyHTML(t('orders.empty'), t('orders.emptySub'),
+          `<a class="btn btn-primary mt16" href="#/mine" data-link>${esc(t('profile.myListings'))}</a>`);
+        return;
+      }
+      // Підтягуємо назви оголошень.
+      const titles = {};
+      await Promise.all([...new Set(orders.map((o) => o.listingId))].map(async (id) => {
+        try { const { listing } = await api.get(id); titles[id] = listing.title; } catch { titles[id] = id; }
+      }));
+
+      box.innerHTML = `<div class="orders-list">${orders.map((o) => {
+        const st = t('orders.status.' + (o.status === 'canceled' ? 'canceled' : o.status)) || o.status;
+        const cls = o.status === 'paid' ? 'status-active' : (o.status === 'pending' ? 'status-archived' : 'status-sold');
+        const planLabel = (plans[o.plan] && plans[o.plan].label) || o.plan;
+        return `<div class="order-card">
+          <div class="order-main">
+            <a href="#/l/${o.listingId}" data-link class="order-title">${esc(titles[o.listingId] || o.listingId)}</a>
+            <div class="order-meta muted">${esc(planLabel)} · ${esc(formatPence(o.amount))} · ${esc(timeAgo(o.createdAt))}</div>
+          </div>
+          <div class="order-side">
+            <span class="status-pill ${cls}">${esc(st)}</span>
+            ${o.status === 'pending' ? `<button class="btn btn-sm btn-primary" data-pay="${o.id}">${esc(t('orders.pay'))}</button>` : ''}
+          </div>
+        </div>`;
+      }).join('')}</div>`;
+
+      // Кнопка «Оплатити» для незавершених замовлень.
+      box.querySelectorAll('[data-pay]').forEach((b) => b.addEventListener('click', async () => {
+        b.disabled = true;
+        try {
+          // Без Stripe — демо-підтвердження; зі Stripe адмін/вебхук завершує оплату.
+          await api.confirmOrder(b.dataset.pay);
+          ctx.toast(t('orders.paidOk')); render();
+        } catch (e) { ctx.toast(e.message); b.disabled = false; }
+      }));
+    } catch (e) {
+      box.innerHTML = `<div class="alert alert-error">${esc(e.message)}</div>`;
     }
   },
 };
@@ -1481,9 +1550,15 @@ async function openPromote(listing, ctx) {
     if (!chosen) return;
     const btn = back.querySelector('#pmBuy'); btn.disabled = true;
     try {
-      const { order } = await api.createOrder(listing.id, chosen.value);
-      // Демо/self-host: одразу підтверджуємо (реальний потік — редірект на платіжку).
-      await api.confirmOrder(order.id);
+      const res = await api.createOrder(listing.id, chosen.value);
+      if (res.paymentUrl) {
+        // Stripe увімкнено — переходимо на захищену сторінку оплати Stripe.
+        ctx.toast(t('feat.redirect'));
+        location.href = res.paymentUrl;
+        return;
+      }
+      // Демо/self-host без Stripe: підтверджуємо одразу.
+      await api.confirmOrder(res.order.id);
       ctx.toast(t('feat.paySucceeded'));
       close();
       render();

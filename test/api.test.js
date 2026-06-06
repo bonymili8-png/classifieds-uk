@@ -530,6 +530,27 @@ test('дохід відображається в адмін-статистиці
   assert.ok(json.ordersPaid >= 1);
 });
 
+test('користувач бачить свої замовлення', async () => {
+  const { status, json } = await req('GET', '/api/orders', { token: tokenA });
+  assert.equal(status, 200);
+  assert.ok(Array.isArray(json.orders));
+  assert.ok(json.orders.some((o) => o.id === orderId), 'своє замовлення присутнє');
+});
+
+test('без Stripe createOrder не повертає paymentUrl (демо-режим)', async () => {
+  const created = await req('POST', '/api/listings', {
+    token: tokenA, body: { title: 'Демо-плата айтем', description: 'перевірка демо-оплати', category: 'goods', location: 'Hull', phone: '+447111006600', price: 10 },
+  });
+  const { json } = await req('POST', '/api/orders', { token: tokenA, body: { listingId: created.json.listing.id, plan: 'bump' } });
+  assert.equal(json.paymentUrl, undefined, 'у демо-режимі без Stripe немає paymentUrl');
+  assert.equal(json.order.status, 'pending');
+});
+
+test('health повідомляє про статус Stripe', async () => {
+  const { json } = await req('GET', '/api/health');
+  assert.equal(json.stripe, false, 'Stripe вимкнено в тестовому середовищі');
+});
+
 /* ============================ Управління користувачами ============================ */
 
 test('адмін бачить список користувачів', async () => {

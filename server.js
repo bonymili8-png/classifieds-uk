@@ -21,6 +21,7 @@ import {
   sendMail, mailEnabled,
   passwordResetEmail, welcomeEmail, newMessageEmail,
 } from './mailer.js';
+import { stripeEnabled, createCheckoutSession, verifyWebhook } from './stripe.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -304,6 +305,21 @@ function readBody(req) {
         reject(Object.assign(new Error('Некоректний JSON'), { status: 400 }));
       }
     });
+    req.on('error', reject);
+  });
+}
+
+// Сире тіло запиту (Buffer) — потрібне для перевірки підпису вебхука Stripe.
+function readRawBody(req) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > MAX_BODY) { reject(Object.assign(new Error('Тіло завелике'), { status: 413 })); req.destroy(); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
 }
@@ -1068,9 +1084,33 @@ async function createOrder(body, user) {
   };
   DB.orders.push(order);
   await saveDB();
-  // Точка інтеграції платіжного провайдера (Stripe Checkout тощо).
-  // Тут повертаємо "ручний" режим: підтвердження через /api/orders/:id/confirm.
+
+  // Якщо налаштовано Stripe — створюємо Checkout Session і повертаємо посилання на оплату.
+  if (stripeEnabled) {
+    try {
+      const sessionData = await createCheckoutSession({ order, plan, customerEmail: user.email });
+      order.stripeSessionId = sessionData.id;
+      await saveDB();
+      return { status: 201, body: { order: publicOrder(order), plan: { ...plan, key: body.plan }, paymentUrl: sessionData.url } };
+    } catch (e) {
+      console.error('Stripe checkout error:', e.message);
+      return { status: 502, body: { error: 'Не вдалося створити платіж. Спробуйте пізніше.' } };
+    }
+  }
+
+  // Інакше — "ручний/демо" режим: підтвердження через /api/orders/:id/confirm.
   return { status: 201, body: { order: publicOrder(order), plan: { ...plan, key: body.plan } } };
+}
+
+// Позначає замовлення оплаченим і застосовує тариф (спільна логіка для
+// ручного підтвердження та Stripe-вебхука). Безпечна до повторного виклику.
+async function markOrderPaid(order) {
+  if (order.status === 'paid') return;
+  order.status = 'paid';
+  order.paidAt = new Date().toISOString();
+  const l = DB.listings.find((x) => x.id === order.listingId);
+  if (l) applyPlan(l, order.plan);
+  await saveDB();
 }
 
 // Застосовує ефект тарифу до оголошення.
@@ -1091,22 +1131,40 @@ function applyPlan(listing, planKey) {
   }
 }
 
-// Підтвердження оплати. PAYMENTS_AUTO_CONFIRM=1 (демо) дозволяє самопідтвердження
-// власником; інакше підтверджує лише адмін (або реальний платіжний вебхук).
+// Підтвердження оплати вручну. Коли Stripe увімкнено — лише адмін (бо реальні
+// оплати приходять вебхуком). Без Stripe: адмін, або власник у демо-режимі
+// PAYMENTS_AUTO_CONFIRM=1.
 async function confirmOrder(id, user) {
   const order = DB.orders.find((o) => o.id === id);
   if (!order) return { status: 404, body: { error: 'Замовлення не знайдено.' } };
   const owner = order.userId === (user && user.id);
-  const allowed = isAdmin(user) || (owner && process.env.PAYMENTS_AUTO_CONFIRM === '1');
-  if (!allowed) return { status: 403, body: { error: 'Оплату підтверджує адміністратор.' } };
-  if (order.status === 'paid') return { status: 200, body: { order: publicOrder(order) } };
-
-  order.status = 'paid';
-  order.paidAt = new Date().toISOString();
+  const demoOk = !stripeEnabled && owner && process.env.PAYMENTS_AUTO_CONFIRM === '1';
+  if (!isAdmin(user) && !demoOk) {
+    return { status: 403, body: { error: 'Оплату підтверджує адміністратор або платіжна система.' } };
+  }
+  await markOrderPaid(order);
   const l = DB.listings.find((x) => x.id === order.listingId);
-  if (l) applyPlan(l, order.plan);
-  await saveDB();
   return { status: 200, body: { order: publicOrder(order), listing: l ? publicListing(l) : null } };
+}
+
+// Обробка вебхука Stripe: при успішній оплаті позначаємо замовлення оплаченим.
+async function handleStripeWebhook(rawBody, sigHeader) {
+  let event;
+  try {
+    event = verifyWebhook(rawBody, sigHeader);
+  } catch (e) {
+    return { status: 400, body: { error: 'Webhook: ' + e.message } };
+  }
+  if (event.type === 'checkout.session.completed') {
+    const sess = event.data.object || {};
+    const orderId = (sess.metadata && sess.metadata.orderId) || sess.client_reference_id;
+    const order = DB.orders.find((o) => o.id === orderId);
+    if (order) {
+      order.stripePaymentStatus = sess.payment_status || 'paid';
+      await markOrderPaid(order);
+    }
+  }
+  return { status: 200, body: { received: true } };
 }
 
 function listMyOrders(user) {
@@ -1441,7 +1499,7 @@ async function handleApi(req, res, url) {
 
   try {
     if (resource === 'health') {
-      return send(res, 200, { ok: true, listings: DB.listings.length, users: DB.users.length, mail: mailEnabled, time: new Date().toISOString() });
+      return send(res, 200, { ok: true, listings: DB.listings.length, users: DB.users.length, mail: mailEnabled, stripe: stripeEnabled, time: new Date().toISOString() });
     }
 
     // Схема додаткових характеристик за категоріями (джерело істини на сервері).
@@ -1601,7 +1659,7 @@ async function handleApi(req, res, url) {
 
     /* ---- Монетизація: тарифи та замовлення ---- */
     if (resource === 'plans' && req.method === 'GET') {
-      return send(res, 200, { plans: PLANS, freeQuota: FREE_LISTING_QUOTA }, { 'Cache-Control': 'public, max-age=3600' });
+      return send(res, 200, { plans: PLANS, freeQuota: FREE_LISTING_QUOTA, stripe: stripeEnabled }, { 'Cache-Control': 'public, max-age=600' });
     }
     if (resource === 'orders') {
       const oid = parts[2];
@@ -1721,6 +1779,17 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/robots.txt') return serveRobots(req, res, url);
   if (url.pathname === '/sitemap.xml') return serveSitemap(req, res, url);
 
+  // Вебхук Stripe: потрібне СИРЕ тіло для перевірки підпису — обробляємо окремо.
+  if (url.pathname === '/api/stripe/webhook' && req.method === 'POST') {
+    try {
+      const raw = await readRawBody(req);
+      const r = await handleStripeWebhook(raw, req.headers['stripe-signature']);
+      return send(res, r.status, r.body);
+    } catch (err) {
+      return send(res, err.status || 400, { error: err.message || 'Webhook error' });
+    }
+  }
+
   // SEO-сторінка оголошення: справжній індексований URL із серверним <title>,
   // meta-description, Open Graph і JSON-LD. SPA на клієнті перехоплює навігацію.
   const seoMatch = /^\/listing\/([A-Za-z0-9_-]+)\/?$/.exec(url.pathname);
@@ -1743,6 +1812,6 @@ loadDB().then(() => {
   server.listen(PORT, HOST, () => {
     console.log(`\n  ОголошенняUK ▸ http://localhost:${PORT}`);
     console.log(`  Оголошень: ${DB.listings.length} · Користувачів: ${DB.users.length}\n`);
-    console.log(`  Термін дії оголошення: ${LISTING_TTL_DAYS} днів · Пошта: ${mailEnabled ? 'увімкнено' : 'лог'}\n`);
+    console.log(`  Термін дії: ${LISTING_TTL_DAYS} днів · Пошта: ${mailEnabled ? 'увімкнено' : 'лог'} · Stripe: ${stripeEnabled ? 'увімкнено' : 'демо'}\n`);
   });
 });

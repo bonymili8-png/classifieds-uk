@@ -527,3 +527,12 @@ label.lbl .req { color: var(--danger); }
 .chart-legend { display: flex; gap: 16px; margin-top: 10px; font-size: .82rem; color: var(--muted); flex-wrap: wrap; }
 .chart-legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: middle; margin-right: 4px; }
 .chart-legend i.bar-views { background: var(--primary); } .chart-legend i.bar-contacts { background: var(--accent); } .chart-legend i.bar-new { background: var(--success); }
+
+/* -------- Мої платежі / замовлення -------- */
+.orders-list { display: flex; flex-direction: column; gap: 10px; }
+.order-card { display: flex; align-items: center; gap: 12px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: 12px 14px; }
+.order-main { flex: 1; min-width: 0; }
+.order-title { font-weight: 700; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.order-meta { font-size: .82rem; margin-top: 2px; }
+.order-side { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
