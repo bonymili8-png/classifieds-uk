@@ -10,6 +10,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
+    "test": "node --test",
     "icons": "node scripts/gen-icons.mjs"
   },
   "keywords": [

@@ -1,0 +1,18 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      # Розкоментуйте та налаштуйте під свій домен/адмінів:
+      # SITE_URL: https://your-domain.example
+      # ADMIN_EMAILS: you@example.com
+      NODE_ENV: production
+    volumes:
+      - ouk-data:/app/data
+      - ouk-uploads:/app/public/uploads
+    restart: unless-stopped
+
+volumes:
+  ouk-data:
+  ouk-uploads:

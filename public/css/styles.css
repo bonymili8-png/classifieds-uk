@@ -334,3 +334,225 @@ label.lbl .req { color: var(--danger); }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); border: 0; }
 
 @media (prefers-reduced-motion: reduce) { * { animation-duration: .001ms !important; transition-duration: .001ms !important; } }
+
+/* =========================================================================
+   Розширення v2: акаунти, чати, профіль, модалки, лайтбокс, статуси
+   ========================================================================= */
+
+.lang-btn { font-weight: 800; font-size: .82rem; letter-spacing: .03em; }
+.btn-sm { padding: 8px 12px; font-size: .9rem; }
+
+.hero-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.narrow { max-width: 560px; }
+.mb16 { margin-bottom: 16px; }
+.dc-title { margin: 0 0 12px; font-size: 1.05rem; }
+.dc-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+
+/* -------- Авторизація в шапці -------- */
+.auth-area { display: flex; align-items: center; gap: 8px; }
+.avatar-btn { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center;
+  background: linear-gradient(135deg, var(--ua-blue), var(--ua-blue-600)); color: #fff; font-weight: 800; overflow: hidden; flex-shrink: 0; }
+.avatar-btn img { width: 100%; height: 100%; object-fit: cover; }
+.nav-badge { position: absolute; top: 4px; right: 6px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px;
+  background: var(--danger); color: #fff; font-size: .64rem; font-weight: 800; display: grid; place-items: center; line-height: 1; }
+.tab .nav-badge { top: 4px; right: calc(50% - 22px); }
+
+/* -------- Аватар (загальний) -------- */
+.avatar { display: inline-grid; place-items: center; border-radius: 50%; overflow: hidden; flex-shrink: 0; background: var(--surface-2); }
+.avatar img { width: 100%; height: 100%; object-fit: cover; }
+.avatar-letter { background: linear-gradient(135deg, var(--ua-blue), var(--ua-blue-600)); color: #fff; font-weight: 800; }
+
+/* -------- Статус «Продано» -------- */
+.card.is-sold { opacity: .72; }
+.sold-badge { position: absolute; top: 10px; left: 10px; z-index: 2; background: var(--danger); color: #fff;
+  font-size: .68rem; font-weight: 800; padding: 4px 9px; border-radius: var(--r-pill); box-shadow: var(--shadow-sm); }
+.sold-badge.static { position: static; }
+
+/* -------- Продавець / профіль -------- */
+.seller-row { display: flex; align-items: center; gap: 12px; }
+.seller-row b { display: block; }
+.seller-row small { display: block; font-size: .8rem; }
+.profile-head { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 8px 0 20px; }
+.profile-meta h1 { margin: 0; font-size: 1.5rem; }
+.profile-meta p { margin: 4px 0 0; }
+
+/* -------- Контакт «написати» -------- */
+.c-msg { background: color-mix(in srgb, var(--accent) 14%, var(--surface)); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); cursor: pointer; width: 100%; text-align: left; }
+
+/* -------- Чати -------- */
+.thread-list { display: flex; flex-direction: column; gap: 2px; }
+.thread-item { display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: var(--r-md);
+  border: 1px solid transparent; transition: background .15s; position: relative; }
+.thread-item:hover { background: var(--surface-2); border-color: var(--border); }
+.thread-main { flex: 1; min-width: 0; }
+.thread-top { display: flex; justify-content: space-between; gap: 8px; }
+.thread-time { font-size: .76rem; flex-shrink: 0; }
+.thread-sub, .thread-listing { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .88rem; }
+.thread-listing { font-size: .78rem; margin-top: 2px; }
+.badge { background: var(--danger); color: #fff; min-width: 20px; height: 20px; border-radius: 999px;
+  display: grid; place-items: center; font-size: .72rem; font-weight: 800; padding: 0 6px; flex-shrink: 0; }
+
+.chat-wrap { display: flex; flex-direction: column; height: calc(100vh - var(--header-h) - var(--tabbar-h) - 70px);
+  min-height: 420px; border: 1px solid var(--border); border-radius: var(--r-lg); overflow: hidden; background: var(--surface); }
+@media (min-width: 860px) { .chat-wrap { height: calc(100vh - var(--header-h) - 120px); } }
+.chat-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--surface-2); }
+.chat-head b { display: block; line-height: 1.2; }
+.chat-listing { display: block; font-size: .8rem; }
+.chat-msgs { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+.msg { max-width: 78%; display: flex; flex-direction: column; }
+.msg.mine { align-self: flex-end; align-items: flex-end; }
+.msg.theirs { align-self: flex-start; align-items: flex-start; }
+.msg-bubble { padding: 9px 13px; border-radius: 16px; line-height: 1.4; word-break: break-word; white-space: pre-wrap; }
+.msg.mine .msg-bubble { background: var(--primary); color: var(--primary-ink); border-bottom-right-radius: 5px; }
+.msg.theirs .msg-bubble { background: var(--surface-2); border: 1px solid var(--border); border-bottom-left-radius: 5px; }
+.msg-time { font-size: .68rem; color: var(--muted-2); margin-top: 3px; padding: 0 4px; }
+.chat-input { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--border); background: var(--surface-2); }
+.chat-input .input { flex: 1; }
+
+/* -------- Модалки -------- */
+.modal-back { position: fixed; inset: 0; z-index: 200; background: rgba(8, 12, 22, .55); backdrop-filter: blur(4px);
+  display: grid; place-items: center; padding: 18px; opacity: 0; transition: opacity .2s; }
+.modal-back.show { opacity: 1; }
+.modal { width: 100%; max-width: 480px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-lg); padding: 22px; box-shadow: var(--shadow-lg); transform: translateY(14px); transition: transform .2s; max-height: 90vh; overflow-y: auto; }
+.modal-back.show .modal { transform: translateY(0); }
+
+/* -------- Лайтбокс -------- */
+.lightbox-back { background: rgba(0, 0, 0, .92); }
+.lightbox-back .modal { background: transparent; border: 0; box-shadow: none; max-width: 96vw; padding: 0; overflow: visible; }
+.lightbox { position: relative; display: grid; place-items: center; }
+.lightbox img { max-width: 96vw; max-height: 86vh; border-radius: var(--r-md); }
+.lb-close { position: absolute; top: -44px; right: 0; background: rgba(255,255,255,.15); color: #fff; border: 0;
+  width: 38px; height: 38px; border-radius: 50%; font-size: 1.2rem; cursor: pointer; }
+.lb-nav { position: absolute; top: 50%; transform: translateY(-50%); background: rgba(255,255,255,.15); color: #fff;
+  border: 0; width: 46px; height: 46px; border-radius: 50%; font-size: 1.8rem; cursor: pointer; line-height: 1; }
+.lb-prev { left: -8px; } .lb-next { right: -8px; }
+@media (min-width: 700px) { .lb-prev { left: -64px; } .lb-next { right: -64px; } }
+.lb-count { position: absolute; bottom: -36px; left: 50%; transform: translateX(-50%); color: #fff; font-size: .85rem; opacity: .8; }
+
+/* -------- Адмін-панель -------- */
+.admin-stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+@media (min-width: 560px) { .admin-stats { grid-template-columns: repeat(4, 1fr); } }
+@media (min-width: 860px) { .admin-stats { grid-template-columns: repeat(7, 1fr); } }
+.stat-tile { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: 14px 12px; text-align: center; }
+.stat-n { font-size: 1.6rem; font-weight: 800; letter-spacing: -.02em; }
+.stat-l { font-size: .76rem; color: var(--muted); margin-top: 2px; }
+
+.seg { display: inline-flex; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-pill); padding: 3px; }
+.seg-btn { border: 0; background: transparent; color: var(--muted); padding: 6px 14px; border-radius: var(--r-pill); font-weight: 600; cursor: pointer; font-size: .85rem; }
+.seg-btn.active { background: var(--primary); color: var(--primary-ink); }
+
+.report-list { display: flex; flex-direction: column; gap: 12px; }
+.report-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: 14px; border-left: 3px solid var(--danger); }
+.report-card.is-resolved { border-left-color: var(--success); opacity: .75; }
+.report-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.report-reason { font-size: .78rem; font-weight: 700; padding: 3px 9px; border-radius: var(--r-pill); background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
+.reason-wrong { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+.report-text { margin: 4px 0 8px; }
+.report-listing { display: block; padding: 9px 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm); font-size: .9rem; }
+
+/* -------- Рейтинги та відгуки -------- */
+.stars { display: inline-flex; gap: 2px; line-height: 1; }
+.stars .star { color: var(--border); font-size: 1.05rem; }
+.stars .star.on { color: #f5a623; }
+.stars-input .star { background: none; border: 0; cursor: pointer; font-size: 1.9rem; padding: 0 2px; transition: transform .1s; }
+.stars-input .star:hover { transform: scale(1.15); }
+.rating-badge { display: inline-flex; align-items: center; gap: 6px; font-size: .92rem; }
+.rating-badge b { font-weight: 800; }
+.rating-badge small { color: var(--muted); }
+
+.review-list { display: flex; flex-direction: column; gap: 12px; }
+.review-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: 14px; }
+.review-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.review-author { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; }
+.review-text { margin: 8px 0 0; line-height: 1.55; white-space: pre-wrap; }
+
+/* -------- Характеристики (атрибути) -------- */
+.attr-heading { margin: 6px 0 12px; font-size: 1rem; font-weight: 700; }
+.attr-switch { margin-top: 8px; }
+.attr-table { margin: 0; display: grid; gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: var(--r-sm); overflow: hidden; }
+.attr-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; }
+.attr-row dt, .attr-row dd { margin: 0; padding: 10px 14px; background: var(--surface); }
+.attr-row dt { color: var(--muted); font-weight: 500; }
+.attr-row dd { font-weight: 600; }
+.card-chips { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 10px; }
+.card-chip { font-size: .72rem; font-weight: 600; color: var(--muted); background: var(--surface-2); border: 1px solid var(--border); padding: 2px 8px; border-radius: var(--r-pill); white-space: nowrap; }
+
+/* -------- Адмінка: управління оголошеннями -------- */
+.admin-tabs { margin-top: 14px; }
+.admin-listing-list { display: flex; flex-direction: column; gap: 8px; }
+.al-row { display: flex; align-items: center; gap: 12px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: 10px 14px; }
+.al-main { flex: 1; min-width: 0; }
+.al-title { font-weight: 700; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.al-meta { font-size: .82rem; margin-top: 2px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.al-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.al-actions .select { width: auto; padding: 6px 8px; font-size: .82rem; }
+@media (max-width: 560px) { .al-row { flex-wrap: wrap; } .al-actions { width: 100%; } }
+
+.status-pill { font-size: .7rem; font-weight: 700; padding: 2px 8px; border-radius: var(--r-pill); }
+.status-active { background: color-mix(in srgb, var(--success) 16%, transparent); color: var(--success); }
+.status-sold { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
+.status-expired { background: color-mix(in srgb, var(--muted) 18%, transparent); color: var(--muted); }
+.status-archived { background: var(--surface-2); color: var(--muted); }
+
+.expiry-note { font-size: .85rem; color: var(--muted); margin: 0 0 12px; }
+.expiry-note.is-expired { color: var(--danger); font-weight: 600; }
+
+/* -------- Монетизація: виділені оголошення -------- */
+.card.is-featured { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent), var(--shadow-sm); }
+.feat-badge { position: absolute; top: 10px; left: 10px; z-index: 2; background: linear-gradient(135deg, #f5a623, #f7c948);
+  color: #3a2c00; font-size: .68rem; font-weight: 800; padding: 4px 9px; border-radius: var(--r-pill); box-shadow: var(--shadow-sm); }
+
+.plan-list { display: flex; flex-direction: column; gap: 10px; }
+.plan-option { display: flex; align-items: center; gap: 12px; padding: 14px; border: 1px solid var(--border);
+  border-radius: var(--r-md); cursor: pointer; transition: border-color .15s, background .15s; }
+.plan-option:has(input:checked) { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 8%, transparent); }
+.plan-body { display: flex; align-items: center; justify-content: space-between; flex: 1; gap: 12px; }
+.plan-price { font-weight: 800; font-size: 1.1rem; color: var(--primary); }
+
+/* -------- Статистика власника -------- */
+.owner-stats { margin-top: 12px; }
+.stat-row { display: flex; gap: 16px; flex-wrap: wrap; font-weight: 600; color: var(--muted); font-size: .95rem; }
+
+/* -------- Адмін: користувачі / дохід / аналітика -------- */
+.al-row.is-banned { opacity: .65; }
+.analytics-chart { display: flex; align-items: flex-end; gap: 6px; height: 200px; padding: 12px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--r-md); overflow-x: auto; }
+.chart-col { flex: 1; min-width: 28px; display: flex; flex-direction: column; align-items: center; gap: 6px; height: 100%; }
+.chart-col .bars { flex: 1; display: flex; align-items: flex-end; gap: 2px; width: 100%; justify-content: center; }
+.bars .bar { width: 7px; border-radius: 3px 3px 0 0; min-height: 2px; transition: height .3s; }
+.bar-views { background: var(--primary); } .bar-contacts { background: var(--accent); } .bar-new { background: var(--success); }
+.chart-label { font-size: .62rem; color: var(--muted-2); white-space: nowrap; }
+.chart-legend { display: flex; gap: 16px; margin-top: 10px; font-size: .82rem; color: var(--muted); flex-wrap: wrap; }
+.chart-legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: middle; margin-right: 4px; }
+.chart-legend i.bar-views { background: var(--primary); } .chart-legend i.bar-contacts { background: var(--accent); } .chart-legend i.bar-new { background: var(--success); }
+
+/* -------- Мої платежі / замовлення -------- */
+.orders-list { display: flex; flex-direction: column; gap: 10px; }
+.order-card { display: flex; align-items: center; gap: 12px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: 12px 14px; }
+.order-main { flex: 1; min-width: 0; }
+.order-title { font-weight: 700; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.order-meta { font-size: .82rem; margin-top: 2px; }
+.order-side { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+
+/* -------- Реєстрація-гейт контактів -------- */
+.contact-gate { text-align: center; padding: 18px 8px; }
+.contact-gate .gate-icon { font-size: 2.2rem; }
+.contact-gate .gate-title { font-weight: 700; margin: 6px 0 2px; }
+
+/* -------- PRO бейдж -------- */
+.pro-badge { display: inline-block; background: linear-gradient(135deg, #7c3aed, #a855f7); color: #fff;
+  font-size: .62rem; font-weight: 800; padding: 2px 8px; border-radius: var(--r-pill); vertical-align: middle; letter-spacing: .04em; }
+
+/* -------- Адмін: редагування рядків тарифів/промокодів -------- */
+.admin-form-row { flex-wrap: wrap; align-items: stretch; }
+.ed-grid { flex: 1; display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; min-width: 0; }
+@media (min-width: 720px) { .ed-grid { grid-template-columns: repeat(3, 1fr); } }
+.ed-grid label { display: flex; flex-direction: column; gap: 3px; font-size: .72rem; color: var(--muted); font-weight: 600; }
+.ed-grid label.ck { flex-direction: row; align-items: center; gap: 6px; }
+.ed-grid .input, .ed-grid .select { padding: 7px 9px; font-size: .9rem; }
+.ed-uses { align-self: center; font-size: .78rem; }
+.admin-form-row .al-actions { align-items: flex-start; padding-top: 16px; }
+@media (max-width: 480px) { .hide-xs { display: none; } }

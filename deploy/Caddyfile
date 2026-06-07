@@ -1,0 +1,35 @@
+# Caddy — найпростіший спосіб отримати HTTPS (Let's Encrypt автоматично).
+#
+# 1. Вкажіть свій домен замість example.com.
+# 2. Запустіть застосунок:  node server.js  (або docker compose up -d)
+# 3. Запустіть Caddy:        caddy run --config ./deploy/Caddyfile
+#
+# Caddy сам отримає й продовжуватиме TLS-сертифікат.
+
+example.com {
+	# Проксі на застосунок ОголошенняUK.
+	reverse_proxy 127.0.0.1:3000
+
+	# Стиснення відповідей.
+	encode zstd gzip
+
+	# Заголовки безпеки додає сам застосунок; тут лише HSTS на рівні edge.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		-Server
+	}
+
+	# Ліміт розміру тіла (фото надсилаються як base64 у JSON).
+	request_body {
+		max_size 25MB
+	}
+
+	log {
+		output file /var/log/caddy/ogoloshennia.log
+	}
+}
+
+# Перенаправлення www → апекс (за бажанням).
+www.example.com {
+	redir https://example.com{uri} permanent
+}
