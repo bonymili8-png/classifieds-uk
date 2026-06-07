@@ -262,3 +262,28 @@ export function newMessageEmail({ toName, fromName, listingTitle, threadId }) {
       <p style="margin:18px 0">${button(link, 'Відповісти в чаті')}</p>`),
   };
 }
+
+export function referralRewardEmail(name, days) {
+  const link = `${SITE}/#/profile`;
+  return {
+    subject: `Вам нараховано ${days} днів PRO 🎉 — ОголошенняUK`,
+    text: `${name}, дякуємо! За вашим запрошенням зареєструвався новий користувач і здійснив оплату. Ми додали вам ${days} днів PRO-підписки.\n${link}`,
+    html: layout('Реферальна винагорода 🎉', `
+      <p>${name}, ваше запрошення спрацювало!</p>
+      <p>Запрошений вами користувач зробив першу оплату — ми нарахували вам <b>${days} днів PRO</b>.</p>
+      <p style="margin:18px 0">${button(link, 'Мій профіль')}</p>`),
+  };
+}
+
+export function subscriptionExpiringEmail(name, daysLeft, untilDate) {
+  const link = `${SITE}/#/profile`;
+  const when = daysLeft <= 0 ? 'сьогодні' : `через ${daysLeft} дн.`;
+  return {
+    subject: `PRO-підписка завершується ${when} — ОголошенняUK`,
+    text: `${name}, ваша PRO-підписка діє до ${untilDate} (${when}). Продовжіть, щоб не втратити переваги.\n${link}`,
+    html: layout('PRO-підписка завершується', `
+      <p>${name}, ваша PRO-підписка діє до <b>${untilDate}</b> (${when}).</p>
+      <p>Продовжіть зараз, щоб зберегти підвищений ліміт оголошень і знижку на просування.</p>
+      <p style="margin:18px 0">${button(link, 'Продовжити підписку')}</p>`),
+  };
+}

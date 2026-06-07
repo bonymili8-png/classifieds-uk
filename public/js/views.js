@@ -808,6 +808,8 @@ export const ProfileView = {
         <button class="btn btn-danger" id="logoutBtn">${esc(t('auth.logout'))}</button>
       </div>
       <div id="profileSettings"></div>
+      ${u.pro && u.proDiscount ? `<div class="alert alert-info">⭐ ${esc(t('pro.discountNote', { n: u.proDiscount }))}</div>` : ''}
+      <div id="referralCard" class="detail-card mb16"></div>
       <div class="section-head"><h2>${esc(t('profile.myListings'))}</h2>
         <a class="btn btn-primary" href="#/new" data-link>+ ${esc(t('nav.add'))}</a></div>
       <div id="myGrid">${gridSkeleton(4)}</div>
@@ -817,6 +819,29 @@ export const ProfileView = {
     if (!session.isAuthed) return;
     const subBtn = root.querySelector('#subscribeBtn');
     if (subBtn) subBtn.addEventListener('click', () => openSubscribe(ctx));
+
+    // Реферальна картка.
+    (async () => {
+      const box = root.querySelector('#referralCard');
+      if (!box) return;
+      try {
+        const r = await api.referral();
+        box.innerHTML = `
+          <h2 class="dc-title">🎁 ${esc(t('ref.title'))}</h2>
+          <p class="muted">${esc(t('ref.desc', { n: r.bonusDays }))}</p>
+          <div class="inline mt8">
+            <input class="input" id="refLink" readonly value="${esc(r.link)}" style="flex:1">
+            <button class="btn" id="refCopy">${esc(t('ref.copy'))}</button>
+          </div>
+          <p class="muted mt8">${esc(t('ref.invited', { n: r.count }))}</p>`;
+        box.querySelector('#refCopy').addEventListener('click', async () => {
+          try {
+            if (navigator.share) { await navigator.share({ url: r.link, title: 'ОголошенняUK' }); }
+            else { await navigator.clipboard.writeText(r.link); ctx.toast(t('ref.copied')); }
+          } catch { try { await navigator.clipboard.writeText(r.link); ctx.toast(t('ref.copied')); } catch { /* ignore */ } }
+        });
+      } catch { box.remove(); }
+    })();
     root.querySelector('#logoutBtn').addEventListener('click', async () => {
       try { await api.logout(); } catch { /* ignore */ }
       session.clear(); ctx.toast('👋'); location.hash = '#/';
@@ -908,7 +933,7 @@ export const OrdersView = {
         return `<div class="order-card">
           <div class="order-main">
             ${titleHTML}
-            <div class="order-meta muted">${esc(planLabel)} · ${esc(formatPence(o.amount))} · ${esc(timeAgo(o.createdAt))}</div>
+            <div class="order-meta muted">${esc(planLabel)} · ${o.amount !== o.baseAmount ? `<s>${esc(formatPence(o.baseAmount))}</s> ` : ''}${esc(formatPence(o.amount))}${o.proDiscount ? ` · ⭐−${o.proDiscount}%` : ''}${o.promo ? ` · ${esc(o.promo)}` : ''} · ${esc(timeAgo(o.createdAt))}</div>
           </div>
           <div class="order-side">
             <span class="status-pill ${cls}">${esc(st)}</span>
@@ -998,6 +1023,7 @@ export const AuthView = {
     return `<div class="container narrow">
       <div class="form-card auth-card">
         <h1 style="margin:0 0 18px;font-size:1.5rem;text-align:center">${isRegister ? esc(t('auth.register')) : esc(t('auth.login'))}</h1>
+        ${isRegister && ctx.query.ref ? `<div class="alert alert-success">🎁 ${esc(t('ref.title'))} · ${esc(ctx.query.ref)}</div>` : ''}
         <div id="authAlert"></div>
         <form id="authForm" class="form-grid">
           ${isRegister ? `<div class="field"><label class="lbl">${esc(t('auth.name'))}</label><input class="input" id="aName" required></div>` : ''}
@@ -1020,8 +1046,11 @@ export const AuthView = {
       try {
         const payload = { email: $('#aEmail').value, password: $('#aPass').value };
         let res;
-        if (isRegister) { payload.name = $('#aName').value; payload.city = $('#aCity').value; res = await api.register(payload); }
-        else res = await api.login(payload);
+        if (isRegister) {
+          payload.name = $('#aName').value; payload.city = $('#aCity').value;
+          if (ctx.query.ref) payload.ref = ctx.query.ref; // реферальний код із посилання
+          res = await api.register(payload);
+        } else res = await api.login(payload);
         session.set(res.token, res.user);
         ctx.toast(isRegister ? t('auth.registered') : t('auth.welcome'));
         location.hash = '#/profile';

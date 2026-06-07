@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import {
   sendMail, mailEnabled,
   passwordResetEmail, welcomeEmail, newMessageEmail,
+  referralRewardEmail, subscriptionExpiringEmail,
 } from './mailer.js';
 import { stripeEnabled, createCheckoutSession, verifyWebhook } from './stripe.js';
 
@@ -125,6 +126,10 @@ const DEFAULT_PLANS = [
 const FREE_LISTING_QUOTA = Number(process.env.FREE_LISTING_QUOTA) || 10;
 // Квота для PRO-передплатників.
 const PRO_LISTING_QUOTA = Number(process.env.PRO_LISTING_QUOTA) || 100;
+// Знижка для PRO на просування оголошень (featured/bump), у відсотках.
+const PRO_PROMO_DISCOUNT = Math.max(0, Math.min(90, Number(process.env.PRO_PROMO_DISCOUNT) || 20));
+// Бонус за реферала (днів PRO рефереру, коли запрошений вперше щось оплатив).
+const REFERRAL_BONUS_DAYS = Math.max(0, Number(process.env.REFERRAL_BONUS_DAYS) || 30);
 
 // Пошук тарифу за ключем.
 function getPlan(key) { return DB.plans.find((p) => p.key === key); }
@@ -181,10 +186,19 @@ async function loadDB() {
   for (const u of DB.users) {
     if (!('banned' in u)) u.banned = false;
     if (!('proUntil' in u)) u.proUntil = null; // дата завершення PRO-підписки
+    if (!u.refCode) u.refCode = refCodeFor(u.id); // персональний реферальний код
+    if (!('referredBy' in u)) u.referredBy = null; // хто запросив
+    if (!('referralCount' in u)) u.referralCount = 0; // скільки запросив (оплатили)
+    if (!('subExpiryNotified' in u)) u.subExpiryNotified = null; // дата останнього нагадування
   }
   pruneSessions();
   expireListings();
   expireFeatured();
+}
+
+// Стабільний реферальний код з id користувача.
+function refCodeFor(id) {
+  return 'R' + sha256(id).slice(0, 7).toUpperCase();
 }
 
 // Чи активна PRO-підписка у користувача.
@@ -203,6 +217,30 @@ function expireFeatured() {
   }
   if (changed) saveDB();
   return changed;
+}
+
+// Email-нагадування про завершення PRO-підписки (за ≤ REMINDER_DAYS днів).
+const SUB_REMINDER_DAYS = Math.max(1, Number(process.env.SUB_REMINDER_DAYS) || 3);
+function remindExpiringSubscriptions() {
+  if (!mailEnabled) return 0;
+  const now = Date.now();
+  const window = SUB_REMINDER_DAYS * 86400000;
+  let sent = 0;
+  for (const u of DB.users) {
+    if (!u.proUntil) continue;
+    const until = new Date(u.proUntil).getTime();
+    if (until <= now) continue;                       // вже завершилась
+    if (until - now > window) continue;               // ще рано
+    // Не дублюємо: нагадуємо раз на поточний цикл підписки.
+    if (u.subExpiryNotified && new Date(u.subExpiryNotified).getTime() > now - window) continue;
+    const daysLeft = Math.ceil((until - now) / 86400000);
+    const tpl = subscriptionExpiringEmail(u.name, daysLeft, new Date(u.proUntil).toLocaleDateString('uk-UA'));
+    sendMail({ to: u.email, subject: tpl.subject, text: tpl.text, html: tpl.html });
+    u.subExpiryNotified = new Date().toISOString();
+    sent++;
+  }
+  if (sent) saveDB();
+  return sent;
 }
 
 // Переводить активні прострочені оголошення у статус "expired".
@@ -440,7 +478,12 @@ function publicUser(u) {
 }
 function selfUser(u) {
   if (!u) return null;
-  return { ...publicUser(u), email: u.email, phone: u.phone || '', isAdmin: isAdmin(u), banned: !!u.banned, pro: isPro(u), proUntil: u.proUntil || null };
+  return {
+    ...publicUser(u), email: u.email, phone: u.phone || '',
+    isAdmin: isAdmin(u), banned: !!u.banned, pro: isPro(u), proUntil: u.proUntil || null,
+    refCode: u.refCode || refCodeFor(u.id), referralCount: u.referralCount || 0,
+    proDiscount: isPro(u) ? PRO_PROMO_DISCOUNT : 0,
+  };
 }
 
 async function registerUser(body) {
@@ -452,13 +495,21 @@ async function registerUser(body) {
   if (password.length < 6) return { status: 400, body: { error: 'Пароль має містити мінімум 6 символів.' } };
   if (DB.users.some((u) => u.email === email)) return { status: 409, body: { error: 'Користувач із таким email вже існує.' } };
 
+  // Реферал: хто запросив (за кодом). Самозапрошення ігнорується пізніше.
+  const referrer = body.ref ? DB.users.find((u) => u.refCode === String(body.ref).trim().toUpperCase()) : null;
+
   const { salt, hash } = hashPassword(password);
+  const id = uid(12);
   const user = {
-    id: uid(12), name, email, salt, hash,
+    id, name, email, salt, hash,
     phone: sanitizePhone(body.phone), city: clampStr(body.city, 60),
     avatar: '', createdAt: new Date().toISOString(),
     // Перший користувач стає адміном, якщо не задано ADMIN_EMAILS.
     isAdmin: !ADMIN_EMAILS.size && DB.users.length === 0,
+    refCode: refCodeFor(id),
+    referredBy: referrer ? referrer.id : null,
+    referralCount: 0,
+    proUntil: null, subExpiryNotified: null,
   };
   DB.users.push(user);
   const token = issueSession(user.id);
@@ -1107,7 +1158,8 @@ function analyticsSeries(days = 14) {
 function publicOrder(o) {
   return {
     id: o.id, listingId: o.listingId, plan: o.plan,
-    amount: o.amount, baseAmount: o.baseAmount ?? o.amount, promo: o.promo || null,
+    amount: o.amount, baseAmount: o.baseAmount ?? o.amount,
+    proDiscount: o.proDiscount || 0, promo: o.promo || null,
     currency: o.currency, status: o.status, kind: o.kind || null,
     createdAt: o.createdAt, paidAt: o.paidAt || null,
   };
@@ -1148,15 +1200,19 @@ async function createOrder(body, user) {
     if (listing.userId !== user.id && !isAdmin(user)) return { status: 403, body: { error: 'Це не ваше оголошення.' } };
   }
 
-  // Промокод (необов'язковий).
+  // Знижка PRO застосовується до просування (featured/bump), не до самих підписок.
+  const proDiscount = (!isSub && isPro(user) && PRO_PROMO_DISCOUNT > 0) ? PRO_PROMO_DISCOUNT : 0;
+  let amount = proDiscount ? Math.round(plan.amount * (1 - proDiscount / 100)) : plan.amount;
+
+  // Промокод (необов'язковий) — застосовується після PRO-знижки.
   const { promo, error } = checkPromo(body.promoCode);
   if (error) return { status: 400, body: { error } };
-  const finalAmount = applyPromoToAmount(plan.amount, promo);
+  const finalAmount = applyPromoToAmount(amount, promo);
 
   const order = {
     id: uid(14), userId: user.id, listingId: isSub ? null : listing.id, plan: plan.key,
     kind: plan.kind, baseAmount: plan.amount, amount: finalAmount,
-    promo: promo ? promo.code : null, currency: 'GBP', status: 'pending',
+    proDiscount, promo: promo ? promo.code : null, currency: 'GBP', status: 'pending',
     createdAt: new Date().toISOString(),
   };
   DB.orders.push(order);
@@ -1186,23 +1242,45 @@ async function createOrder(body, user) {
   return { status: 201, body: { order: publicOrder(order), plan } };
 }
 
+// Продовжує PRO-підписку користувача на N днів (від поточного кінця або зараз).
+function grantProDays(user, days) {
+  if (!user || days <= 0) return;
+  const now = Date.now();
+  const base = user.proUntil && new Date(user.proUntil).getTime() > now ? new Date(user.proUntil).getTime() : now;
+  user.proUntil = new Date(base + days * 86400000).toISOString();
+  // Нове продовження — скидаємо позначку нагадування, щоб попередити знову перед кінцем.
+  user.subExpiryNotified = null;
+}
+
+// Реферальна винагорода: коли запрошений уперше щось оплачує — рефереру нараховуємо PRO-дні.
+async function payReferralBonus(buyer) {
+  if (!buyer || !buyer.referredBy || buyer.referralRewarded) return;
+  const referrer = DB.users.find((u) => u.id === buyer.referredBy);
+  if (!referrer || referrer.id === buyer.id) return;
+  buyer.referralRewarded = true;
+  referrer.referralCount = (referrer.referralCount || 0) + 1;
+  if (REFERRAL_BONUS_DAYS > 0) {
+    grantProDays(referrer, REFERRAL_BONUS_DAYS);
+    const tpl = referralRewardEmail(referrer.name, REFERRAL_BONUS_DAYS);
+    sendMail({ to: referrer.email, subject: tpl.subject, text: tpl.text, html: tpl.html });
+  }
+}
+
 // Позначає замовлення оплаченим і застосовує ефект (просування або підписку).
 async function markOrderPaid(order) {
   if (order.status === 'paid') return;
   order.status = 'paid';
   order.paidAt = new Date().toISOString();
   const plan = getPlan(order.plan);
+  const buyer = DB.users.find((x) => x.id === order.userId);
   if (plan && plan.kind === 'subscription') {
-    const u = DB.users.find((x) => x.id === order.userId);
-    if (u) {
-      const now = Date.now();
-      const base = u.proUntil && new Date(u.proUntil).getTime() > now ? new Date(u.proUntil).getTime() : now;
-      u.proUntil = new Date(base + (plan.days || 30) * 86400000).toISOString();
-    }
+    grantProDays(buyer, plan.days || 30);
   } else if (order.listingId) {
     const l = DB.listings.find((x) => x.id === order.listingId);
     if (l) applyPlan(l, order.plan);
   }
+  // Перша оплата запрошеного — винагорода рефереру.
+  await payReferralBonus(buyer);
   await saveDB();
 }
 
@@ -1301,6 +1379,7 @@ function adminUserView(u) {
     id: u.id, name: u.name, email: u.email, city: u.city || '',
     createdAt: u.createdAt, isAdmin: isAdmin(u), banned: !!u.banned,
     pro: isPro(u), proUntil: u.proUntil || null,
+    referralCount: u.referralCount || 0, referredBy: u.referredBy || null,
     listings: DB.listings.filter((l) => l.userId === u.id).length,
   };
 }
@@ -1332,9 +1411,7 @@ async function adminUpdateUser(id, body, admin) {
     case 'demote': u.isAdmin = false; audit(admin.id, 'demote_user', u.id); break;
     case 'grantPro': {
       const days = Math.max(1, Math.min(3650, Number(body.days) || 30));
-      const now = Date.now();
-      const base = u.proUntil && new Date(u.proUntil).getTime() > now ? new Date(u.proUntil).getTime() : now;
-      u.proUntil = new Date(base + days * 86400000).toISOString();
+      grantProDays(u, days);
       audit(admin.id, 'grant_pro', u.id);
       break;
     }
@@ -1743,6 +1820,15 @@ async function handleApi(req, res, url) {
       if (req.method === 'GET' && action === 'me') {
         return send(res, 200, { user: selfUser(user) });
       }
+      // Реферальна інформація поточного користувача.
+      if (req.method === 'GET' && action === 'referral') {
+        if (!user) return send(res, 401, { error: 'Не авторизовано.' });
+        const base = baseUrl(req);
+        return send(res, 200, {
+          code: user.refCode, link: `${base}/#/register?ref=${user.refCode}`,
+          count: user.referralCount || 0, bonusDays: REFERRAL_BONUS_DAYS,
+        });
+      }
       if (req.method === 'PUT' && action === 'me') {
         if (!user) return send(res, 401, { error: 'Не авторизовано.' });
         const r = await updateProfile(user, await readBody(req));
@@ -1953,6 +2039,12 @@ async function handleApi(req, res, url) {
       if (req.method === 'GET' && sub === 'audit') {
         return send(res, 200, { audit: DB.audit.slice(-200).reverse() });
       }
+      // Ручний запуск розсилки нагадувань про завершення підписки.
+      if (req.method === 'POST' && sub === 'remind-subs') {
+        const sent = remindExpiringSubscriptions();
+        audit(user.id, 'remind_subs', String(sent));
+        return send(res, 200, { sent });
+      }
       // Бекап усієї бази (без паролів/токенів) — для збереження адміном.
       if (req.method === 'GET' && sub === 'backup') {
         const dump = adminBackup();
@@ -2045,7 +2137,8 @@ const server = http.createServer(async (req, res) => {
 
 loadDB().then(() => {
   // Періодично прибираємо прострочені оголошення (раз на годину).
-  setInterval(() => { expireListings(); expireFeatured(); }, 60 * 60 * 1000).unref?.();
+  setInterval(() => { expireListings(); expireFeatured(); remindExpiringSubscriptions(); }, 60 * 60 * 1000).unref?.();
+  remindExpiringSubscriptions(); // одразу при старті
 
   server.listen(PORT, HOST, () => {
     console.log(`\n  ОголошенняUK ▸ http://localhost:${PORT}`);

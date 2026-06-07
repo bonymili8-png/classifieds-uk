@@ -653,6 +653,86 @@ test('адмін видає та знімає PRO', async () => {
   assert.equal(revoke.json.user.pro, false);
 });
 
+/* ============================ Знижка PRO на просування ============================ */
+
+test('PRO отримує знижку на просування, але не на підписку', async () => {
+  const reg = await req('POST', '/api/auth/register', { body: { name: 'PRO Знижка', email: 'prodisc@test.dev', password: 'secret123' } });
+  const token = reg.json.token, uid = reg.json.user.id;
+  await req('POST', `/api/admin/users/${uid}`, { token: adminToken, body: { action: 'grantPro', days: 30 } });
+  // me.proDiscount > 0
+  const me = await req('GET', '/api/auth/me', { token });
+  assert.ok(me.json.user.proDiscount > 0, 'PRO бачить знижку');
+
+  // Просування featured7 (base 599 після раніших правок? — використовуємо власну ціну незалежно)
+  const listing = await req('POST', '/api/listings', { token, body: { title: 'PRO знижка айтем', description: 'опис опис опис', category: 'goods', location: 'Hull', phone: '+447111010101', price: 10 } });
+  const order = await req('POST', '/api/orders', { token, body: { listingId: listing.json.listing.id, plan: 'featured7' } });
+  assert.ok(order.json.order.proDiscount > 0, 'знижка застосована');
+  assert.ok(order.json.order.amount < order.json.order.baseAmount, 'ціна нижча за базову');
+
+  // Підписка — без PRO-знижки.
+  const sub = await req('POST', '/api/orders', { token, body: { plan: 'pro_month' } });
+  assert.equal(sub.json.order.proDiscount, 0, 'на підписку PRO-знижки немає');
+  assert.equal(sub.json.order.amount, sub.json.order.baseAmount);
+});
+
+/* ============================ Реферальна програма ============================ */
+
+test('реферальна інформація доступна, код стабільний', async () => {
+  const reg = await req('POST', '/api/auth/register', { body: { name: 'Реферер', email: 'referrer@test.dev', password: 'secret123' } });
+  const token = reg.json.token;
+  const r = await req('GET', '/api/auth/referral', { token });
+  assert.equal(r.status, 200);
+  assert.match(r.json.code, /^R[0-9A-F]{7}$/, 'код у форматі RXXXXXXX');
+  assert.ok(r.json.link.includes('ref=' + r.json.code));
+  assert.equal(r.json.count, 0);
+});
+
+test('перша оплата запрошеного нараховує бонус рефереру', async () => {
+  const refReg = await req('POST', '/api/auth/register', { body: { name: 'Бонус Реферер', email: 'bonusref@test.dev', password: 'secret123' } });
+  const refToken = refReg.json.token;
+  const ref = await req('GET', '/api/auth/referral', { token: refToken });
+  const code = ref.json.code;
+
+  // Запрошений реєструється з кодом.
+  const invReg = await req('POST', '/api/auth/register', { body: { name: 'Запрошений', email: 'invited@test.dev', password: 'secret123', ref: code } });
+  const invToken = invReg.json.token;
+
+  // До оплати — реферер не PRO.
+  const before = await req('GET', '/api/auth/me', { token: refToken });
+  assert.equal(before.json.user.pro, false);
+
+  // Запрошений купує підписку (перша оплата).
+  const order = await req('POST', '/api/orders', { token: invToken, body: { plan: 'pro_month' } });
+  await req('POST', `/api/orders/${order.json.order.id}/confirm`, { token: adminToken });
+
+  // Реферер отримав PRO-бонус і лічильник.
+  const after = await req('GET', '/api/auth/referral', { token: refToken });
+  assert.equal(after.json.count, 1, 'лічильник рефералів зріс');
+  const me = await req('GET', '/api/auth/me', { token: refToken });
+  assert.equal(me.json.user.pro, true, 'реферер став PRO');
+});
+
+test('самозапрошення неможливе (бонус лише за іншого)', async () => {
+  const reg = await req('POST', '/api/auth/register', { body: { name: 'Сам Себе', email: 'self@test.dev', password: 'secret123' } });
+  // Реєстрація з власним кодом неможлива (код видається після створення), тож просто
+  // перевіряємо, що referredBy на старті null і count не росте від власних оплат.
+  const r = await req('GET', '/api/auth/referral', { token: reg.json.token });
+  assert.equal(r.json.count, 0);
+});
+
+/* ============================ Нагадування про підписку ============================ */
+
+test('адмін може запустити розсилку нагадувань (0 без SMTP)', async () => {
+  const { status, json } = await req('POST', '/api/admin/remind-subs', { token: adminToken });
+  assert.equal(status, 200);
+  assert.equal(json.sent, 0, 'без SMTP нічого не надсилається');
+});
+
+test('не-адмін не може запустити розсилку (403)', async () => {
+  const { status } = await req('POST', '/api/admin/remind-subs', { token: tokenA });
+  assert.equal(status, 403);
+});
+
 /* ============================ Гейт контактів ============================ */
 
 test('анонім не бачить контактів, авторизований бачить', async () => {

@@ -54,6 +54,7 @@ export const api = {
   login(payload) { return request('/api/auth/login', { method: 'POST', body: JSON.stringify(payload) }); },
   logout() { return request('/api/auth/logout', { method: 'POST' }); },
   me() { return request('/api/auth/me'); },
+  referral() { return request('/api/auth/referral'); },
   updateProfile(payload) { return request('/api/auth/me', { method: 'PUT', body: JSON.stringify(payload) }); },
   forgotPassword(email) { return request('/api/auth/forgot', { method: 'POST', body: JSON.stringify({ email }) }); },
   resetPassword(token, password) { return request('/api/auth/reset', { method: 'POST', body: JSON.stringify({ token, password }) }); },
