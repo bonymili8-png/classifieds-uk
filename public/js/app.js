@@ -147,7 +147,8 @@ function renderAuthArea() {
         ? `<img src="${session.user.avatar}" alt="">` : initials}</a>`;
     refreshUnread();
   } else {
-    area.innerHTML = `<a class="btn btn-ghost btn-sm" href="#/login" data-link>${t('auth.login')}</a>`;
+    area.innerHTML = `<a class="btn btn-ghost btn-sm hide-xs" href="#/login" data-link>${t('auth.login')}</a>
+      <a class="btn btn-primary btn-sm" href="#/register" data-link>${t('gate.register')}</a>`;
   }
 }
 

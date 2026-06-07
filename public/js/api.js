@@ -85,8 +85,12 @@ export const api = {
 
   // -- Монетизація --
   plans() { return request('/api/plans'); },
+  checkPromo(code) { return request('/api/promos/check?code=' + encodeURIComponent(code)); },
   myOrders() { return request('/api/orders'); },
-  createOrder(listingId, plan) { return request('/api/orders', { method: 'POST', body: JSON.stringify({ listingId, plan }) }); },
+  // listingId опційний (для підписок — null). promoCode опційний.
+  createOrder(plan, listingId, promoCode) {
+    return request('/api/orders', { method: 'POST', body: JSON.stringify({ plan, listingId, promoCode }) });
+  },
   confirmOrder(id) { return request('/api/orders/' + encodeURIComponent(id) + '/confirm', { method: 'POST' }); },
 
   // -- Адмін --
@@ -96,10 +100,20 @@ export const api = {
   adminResolveReport(id, resolved = true) { return request('/api/admin/reports/' + encodeURIComponent(id), { method: 'POST', body: JSON.stringify({ resolved }) }); },
   adminDeleteListing(id) { return request('/api/admin/listings/' + encodeURIComponent(id), { method: 'DELETE' }); },
   adminUsers(q = '') { return request('/api/admin/users' + (q ? '?q=' + encodeURIComponent(q) : '')); },
-  adminUserAction(id, action) { return request('/api/admin/users/' + encodeURIComponent(id), { method: 'POST', body: JSON.stringify({ action }) }); },
+  adminUserAction(id, action, extra = {}) { return request('/api/admin/users/' + encodeURIComponent(id), { method: 'POST', body: JSON.stringify({ action, ...extra }) }); },
   adminOrders() { return request('/api/admin/orders'); },
   adminAudit() { return request('/api/admin/audit'); },
   adminBackupUrl() { return '/api/admin/backup' + (session.token ? '?token=' + encodeURIComponent(session.token) : ''); },
+  // Тарифи (CRUD)
+  adminPlans() { return request('/api/admin/plans'); },
+  adminCreatePlan(p) { return request('/api/admin/plans', { method: 'POST', body: JSON.stringify(p) }); },
+  adminUpdatePlan(key, p) { return request('/api/admin/plans/' + encodeURIComponent(key), { method: 'PUT', body: JSON.stringify(p) }); },
+  adminDeletePlan(key) { return request('/api/admin/plans/' + encodeURIComponent(key), { method: 'DELETE' }); },
+  // Промокоди (CRUD)
+  adminPromos() { return request('/api/admin/promos'); },
+  adminCreatePromo(p) { return request('/api/admin/promos', { method: 'POST', body: JSON.stringify(p) }); },
+  adminUpdatePromo(code, p) { return request('/api/admin/promos/' + encodeURIComponent(code), { method: 'PUT', body: JSON.stringify(p) }); },
+  adminDeletePromo(code) { return request('/api/admin/promos/' + encodeURIComponent(code), { method: 'DELETE' }); },
 };
 
 // Підвантажити поточного користувача за збереженим токеном.

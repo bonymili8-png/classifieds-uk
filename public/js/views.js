@@ -330,8 +330,18 @@ export const DetailView = {
 
           <div class="detail-card">
             <h2 class="dc-title">${esc(t('detail.contacts'))}</h2>
-            <div class="contact-list">${contacts.join('') || `<p class="muted">${esc(t('detail.noContacts'))}</p>`}</div>
-            <p class="hint mt16">${esc(t('detail.warn'))}</p>
+            ${l.contactsLocked ? `
+              <div class="contact-gate">
+                <div class="gate-icon">🔒</div>
+                <p class="gate-title">${esc(t('gate.title'))}</p>
+                <p class="muted">${esc(t('gate.sub'))}</p>
+                <div class="row-gap mt16">
+                  <a class="btn btn-primary" href="#/register" data-link>${esc(t('gate.register'))}</a>
+                  <a class="btn" href="#/login" data-link>${esc(t('gate.login'))}</a>
+                </div>
+              </div>`
+            : `<div class="contact-list">${contacts.join('') || `<p class="muted">${esc(t('detail.noContacts'))}</p>`}</div>
+               <p class="hint mt16">${esc(t('detail.warn'))}</p>`}
           </div>
 
           ${sellerCard}
@@ -450,11 +460,25 @@ function render() { window.dispatchEvent(new HashChangeEvent('hashchange')); }
 export const FormView = {
   async render(ctx) {
     const editing = ctx.name === 'edit';
+    // Гейт реєстрації при додаванні оголошення (можна продовжити як гість).
+    if (!session.isAuthed && !editing && ctx.query.guest !== '1') {
+      return `<div class="container narrow"><a class="back-link" href="#/" data-link>‹ ${esc(t('common.back'))}</a>
+        <div class="form-card auth-card">
+          <div class="gate-icon" style="text-align:center;font-size:2.4rem">📝</div>
+          <h1 style="text-align:center;margin:6px 0 4px;font-size:1.4rem">${esc(t('form.newTitle'))}</h1>
+          <p class="muted center" style="margin:0 0 18px">${esc(t('gate.newListing'))}</p>
+          <div class="form-grid">
+            <a class="btn btn-primary btn-lg btn-block" href="#/register" data-link>${esc(t('gate.register'))}</a>
+            <a class="btn btn-lg btn-block" href="#/login" data-link>${esc(t('gate.login'))}</a>
+            <a class="btn btn-ghost btn-block" href="#/new?guest=1" data-link>${esc(t('common.cancel'))} — ${esc(t('nav.add'))} ↦</a>
+          </div>
+        </div></div>`;
+    }
     return `<div class="container"><a class="back-link" href="javascript:history.back()">‹ ${esc(t('common.back'))}</a>
       <div class="form-card">
         <h1 style="margin:0 0 4px;font-size:1.4rem">${editing ? esc(t('form.editTitle')) : esc(t('form.newTitle'))}</h1>
         <p class="muted" style="margin:0 0 18px">${esc(t('form.intro'))}</p>
-        ${!session.isAuthed && !editing ? `<div class="alert alert-info">${esc(t('auth.needLogin'))} <a href="#/login" data-link><b>${esc(t('auth.login'))}</b></a> — ${esc(t('chats.about'))} ${esc(t('detail.message'))}.</div>` : ''}
+        ${!session.isAuthed && !editing ? `<div class="alert alert-info">${esc(t('gate.newListing'))} <a href="#/register" data-link><b>${esc(t('gate.register'))}</b></a></div>` : ''}
         <div id="formAlert"></div>
         <form id="adForm">
           <div class="form-grid">
@@ -512,6 +536,8 @@ export const FormView = {
 
   async mount(root, ctx) {
     const editing = ctx.name === 'edit';
+    // Якщо показано гейт реєстрації — форми немає, нічого не монтуємо.
+    if (!root.querySelector('#adForm')) return;
     const $ = (id) => root.querySelector(id);
     let images = [];
 
@@ -771,10 +797,12 @@ export const ProfileView = {
       <div class="profile-head">
         ${avatarHTML(u, 72)}
         <div class="profile-meta">
-          <h1>${esc(u.name)}</h1>
-          <p class="muted">${u.city ? esc(u.city) + ' · ' : ''}${esc(t('profile.memberSince'))} ${esc(timeAgo(u.createdAt))}</p>
+          <h1>${esc(u.name)} ${u.pro ? `<span class="pro-badge">${esc(t('sub.badge'))}</span>` : ''}</h1>
+          <p class="muted">${u.city ? esc(u.city) + ' · ' : ''}${esc(t('profile.memberSince'))} ${esc(timeAgo(u.createdAt))}
+            ${u.pro && u.proUntil ? ' · ' + esc(t('sub.active', { d: new Date(u.proUntil).toLocaleDateString() })) : ''}</p>
         </div>
         <div class="spacer"></div>
+        ${!u.pro ? `<button class="btn btn-primary" id="subscribeBtn">${esc(t('subscribe.cta'))}</button>` : ''}
         <a class="btn" href="#/orders" data-link>💳 ${esc(t('orders.title'))}</a>
         <button class="btn" id="editProfileBtn">⚙ ${esc(t('profile.settings'))}</button>
         <button class="btn btn-danger" id="logoutBtn">${esc(t('auth.logout'))}</button>
@@ -787,6 +815,8 @@ export const ProfileView = {
   },
   async mount(root, ctx) {
     if (!session.isAuthed) return;
+    const subBtn = root.querySelector('#subscribeBtn');
+    if (subBtn) subBtn.addEventListener('click', () => openSubscribe(ctx));
     root.querySelector('#logoutBtn').addEventListener('click', async () => {
       try { await api.logout(); } catch { /* ignore */ }
       session.clear(); ctx.toast('👋'); location.hash = '#/';
@@ -861,9 +891,9 @@ export const OrdersView = {
           `<a class="btn btn-primary mt16" href="#/mine" data-link>${esc(t('profile.myListings'))}</a>`);
         return;
       }
-      // Підтягуємо назви оголошень.
+      // Підтягуємо назви оголошень (лише для замовлень із оголошенням).
       const titles = {};
-      await Promise.all([...new Set(orders.map((o) => o.listingId))].map(async (id) => {
+      await Promise.all([...new Set(orders.map((o) => o.listingId).filter(Boolean))].map(async (id) => {
         try { const { listing } = await api.get(id); titles[id] = listing.title; } catch { titles[id] = id; }
       }));
 
@@ -871,9 +901,13 @@ export const OrdersView = {
         const st = t('orders.status.' + (o.status === 'canceled' ? 'canceled' : o.status)) || o.status;
         const cls = o.status === 'paid' ? 'status-active' : (o.status === 'pending' ? 'status-archived' : 'status-sold');
         const planLabel = (plans[o.plan] && plans[o.plan].label) || o.plan;
+        const isSub = o.kind === 'subscription' || !o.listingId;
+        const titleHTML = isSub
+          ? `<span class="order-title">⭐ ${esc(t('order.subscription'))}</span>`
+          : `<a href="#/l/${o.listingId}" data-link class="order-title">${esc(titles[o.listingId] || o.listingId)}</a>`;
         return `<div class="order-card">
           <div class="order-main">
-            <a href="#/l/${o.listingId}" data-link class="order-title">${esc(titles[o.listingId] || o.listingId)}</a>
+            ${titleHTML}
             <div class="order-meta muted">${esc(planLabel)} · ${esc(formatPence(o.amount))} · ${esc(timeAgo(o.createdAt))}</div>
           </div>
           <div class="order-side">
@@ -1158,6 +1192,8 @@ export const AdminView = {
         <button class="seg-btn" data-tab="listings">${esc(t('admin.tabListings'))}</button>
         <button class="seg-btn" data-tab="users">${esc(t('admin.tabUsers'))}</button>
         <button class="seg-btn" data-tab="revenue">${esc(t('admin.tabRevenue'))}</button>
+        <button class="seg-btn" data-tab="plans">${esc(t('admin.tabPlans'))}</button>
+        <button class="seg-btn" data-tab="promos">${esc(t('admin.tabPromos'))}</button>
         <button class="seg-btn" data-tab="reports">${esc(t('admin.tabReports'))}</button>
       </div>
 
@@ -1178,6 +1214,18 @@ export const AdminView = {
 
       <section data-pane="revenue" hidden>
         <div id="adminRevenue" class="mt16">${gridSkeleton(2)}</div>
+      </section>
+
+      <section data-pane="plans" hidden>
+        <div class="section-head" style="margin-top:18px"><h2>${esc(t('admin.tabPlans'))}</h2>
+          <button class="btn btn-sm btn-primary" id="planNewBtn">${esc(t('admin.planNew'))}</button></div>
+        <div id="adminPlans">${gridSkeleton(2)}</div>
+      </section>
+
+      <section data-pane="promos" hidden>
+        <div class="section-head" style="margin-top:18px"><h2>${esc(t('admin.tabPromos'))}</h2>
+          <button class="btn btn-sm btn-primary" id="promoNewBtn">${esc(t('admin.promoNew'))}</button></div>
+        <div id="adminPromos">${gridSkeleton(2)}</div>
       </section>
 
       <section data-pane="listings" hidden>
@@ -1219,7 +1267,105 @@ export const AdminView = {
       if (tab === 'users') loadUsers();
       if (tab === 'revenue') loadRevenue();
       if (tab === 'analytics') loadAnalytics();
+      if (tab === 'plans') loadPlans();
+      if (tab === 'promos') loadPromos();
     }));
+
+    /* -------- CRUD тарифів -------- */
+    const KINDS = ['bump', 'featured', 'subscription'];
+    async function loadPlans() {
+      const box = root.querySelector('#adminPlans');
+      box.innerHTML = gridSkeleton(2);
+      try {
+        const { plans } = await api.adminPlans();
+        box.innerHTML = `<div class="admin-listing-list">${plans.map((p) => planRow(p)).join('')}</div>`;
+        bindPlanRows(box);
+      } catch (e) { box.innerHTML = `<div class="alert alert-error">${esc(e.message)}</div>`; }
+    }
+    function planRow(p) {
+      return `<div class="al-row admin-form-row" data-key="${esc(p.key)}">
+        <div class="ed-grid">
+          <label>${esc(t('admin.planKey'))}<input class="input" data-f="key" value="${esc(p.key)}" disabled></label>
+          <label>${esc(t('admin.planLabel'))}<input class="input" data-f="label" value="${esc(p.label)}"></label>
+          <label>${esc(t('admin.planAmount'))}<input class="input" data-f="amount" type="number" value="${p.amount}"></label>
+          <label>${esc(t('admin.planDays'))}<input class="input" data-f="days" type="number" value="${p.days}"></label>
+          <label>${esc(t('admin.planKind'))}<select class="select" data-f="kind">${KINDS.map((k) => `<option value="${k}" ${p.kind === k ? 'selected' : ''}>${esc(t('kind.' + k))}</option>`).join('')}</select></label>
+          <label class="ck">${esc(t('admin.planActive'))}<input type="checkbox" data-f="active" ${p.active ? 'checked' : ''}></label>
+        </div>
+        <div class="al-actions">
+          <button class="btn btn-sm btn-primary" data-save>${esc(t('admin.save'))}</button>
+          <button class="btn btn-sm btn-danger" data-del>${esc(t('admin.delete'))}</button>
+        </div></div>`;
+    }
+    function readRow(row) {
+      const get = (f) => row.querySelector(`[data-f="${f}"]`);
+      return {
+        key: get('key').value, label: get('label').value,
+        amount: Number(get('amount').value), days: Number(get('days').value),
+        kind: get('kind').value, active: get('active').checked,
+      };
+    }
+    function bindPlanRows(box) {
+      box.querySelectorAll('.admin-form-row').forEach((row) => {
+        row.querySelector('[data-save]').addEventListener('click', async () => {
+          try { await api.adminUpdatePlan(row.dataset.key, readRow(row)); ctx.toast(t('admin.saved')); }
+          catch (e) { ctx.toast(e.message); }
+        });
+        row.querySelector('[data-del]').addEventListener('click', async () => {
+          if (!confirm(t('admin.delete') + '?')) return;
+          try { await api.adminDeletePlan(row.dataset.key); ctx.toast(t('admin.delete') + ' ✓'); loadPlans(); }
+          catch (e) { ctx.toast(e.message); }
+        });
+      });
+    }
+    root.querySelector('#planNewBtn').addEventListener('click', () => openPlanEditor(ctx, loadPlans));
+
+    /* -------- CRUD промокодів -------- */
+    async function loadPromos() {
+      const box = root.querySelector('#adminPromos');
+      box.innerHTML = gridSkeleton(2);
+      try {
+        const { promos } = await api.adminPromos();
+        if (!promos.length) { box.innerHTML = emptyHTML(t('empty.title'), ''); return; }
+        box.innerHTML = `<div class="admin-listing-list">${promos.map((p) => promoRow(p)).join('')}</div>`;
+        box.querySelectorAll('.admin-form-row').forEach((row) => {
+          const get = (f) => row.querySelector(`[data-f="${f}"]`);
+          row.querySelector('[data-save]').addEventListener('click', async () => {
+            try {
+              await api.adminUpdatePromo(row.dataset.code, {
+                value: Number(get('value').value), kind: get('kind').value,
+                active: get('active').checked, maxUses: Number(get('maxUses').value),
+                expiresAt: get('expiresAt').value || null,
+              });
+              ctx.toast(t('admin.saved'));
+            } catch (e) { ctx.toast(e.message); }
+          });
+          row.querySelector('[data-del]').addEventListener('click', async () => {
+            if (!confirm(t('admin.delete') + '?')) return;
+            try { await api.adminDeletePromo(row.dataset.code); ctx.toast(t('admin.delete') + ' ✓'); loadPromos(); }
+            catch (e) { ctx.toast(e.message); }
+          });
+        });
+      } catch (e) { box.innerHTML = `<div class="alert alert-error">${esc(e.message)}</div>`; }
+    }
+    function promoRow(p) {
+      const exp = p.expiresAt ? p.expiresAt.slice(0, 10) : '';
+      return `<div class="al-row admin-form-row" data-code="${esc(p.code)}">
+        <div class="ed-grid">
+          <label>${esc(t('admin.promoCode'))}<input class="input" value="${esc(p.code)}" disabled></label>
+          <label>${esc(t('admin.promoKind'))}<select class="select" data-f="kind"><option value="percent" ${p.kind === 'percent' ? 'selected' : ''}>${esc(t('kind.percent'))}</option><option value="fixed" ${p.kind === 'fixed' ? 'selected' : ''}>${esc(t('kind.fixed'))}</option></select></label>
+          <label>${esc(t('admin.promoValue'))}<input class="input" data-f="value" type="number" value="${p.value}"></label>
+          <label>${esc(t('admin.promoMaxUses'))}<input class="input" data-f="maxUses" type="number" value="${p.maxUses}"></label>
+          <label>${esc(t('admin.promoExpires'))}<input class="input" data-f="expiresAt" type="date" value="${exp}"></label>
+          <label class="ck">${esc(t('admin.planActive'))}<input type="checkbox" data-f="active" ${p.active ? 'checked' : ''}></label>
+          <span class="muted ed-uses">${esc(t('admin.promoUses'))}: ${p.uses}${p.maxUses ? '/' + p.maxUses : ''}</span>
+        </div>
+        <div class="al-actions">
+          <button class="btn btn-sm btn-primary" data-save>${esc(t('admin.save'))}</button>
+          <button class="btn btn-sm btn-danger" data-del>${esc(t('admin.delete'))}</button>
+        </div></div>`;
+    }
+    root.querySelector('#promoNewBtn').addEventListener('click', () => openPromoEditor(ctx, loadPromos));
 
     /* -------- Управління користувачами -------- */
     let auTimer;
@@ -1232,13 +1378,16 @@ export const AdminView = {
         box.innerHTML = `<div class="admin-listing-list">${users.map((u) => `
           <div class="al-row ${u.banned ? 'is-banned' : ''}">
             <div class="al-main">
-              <a href="#/u/${u.id}" data-link class="al-title">${esc(u.name)} ${u.isAdmin ? '🛡️' : ''} ${u.banned ? `<span class="status-pill status-sold">${esc(t('admin.banned'))}</span>` : ''}</a>
+              <a href="#/u/${u.id}" data-link class="al-title">${esc(u.name)} ${u.isAdmin ? '🛡️' : ''} ${u.pro ? `<span class="pro-badge">${esc(t('sub.badge'))}</span>` : ''} ${u.banned ? `<span class="status-pill status-sold">${esc(t('admin.banned'))}</span>` : ''}</a>
               <div class="al-meta muted">${esc(u.email)} · ${u.listings} 📦 · ${esc(timeAgo(u.createdAt))}</div>
             </div>
             <div class="al-actions">
               ${u.banned
                 ? `<button class="btn btn-sm" data-uact="unban" data-uid="${u.id}">${esc(t('admin.unban'))}</button>`
                 : `<button class="btn btn-sm btn-danger" data-uact="ban" data-uid="${u.id}">${esc(t('admin.ban'))}</button>`}
+              ${u.pro
+                ? `<button class="btn btn-sm" data-uact="revokePro" data-uid="${u.id}">${esc(t('admin.revokePro'))}</button>`
+                : `<button class="btn btn-sm" data-uact="grantPro" data-uid="${u.id}">${esc(t('admin.grantPro'))}</button>`}
               ${u.isAdmin
                 ? `<button class="btn btn-sm" data-uact="demote" data-uid="${u.id}">${esc(t('admin.demote'))}</button>`
                 : `<button class="btn btn-sm" data-uact="promote" data-uid="${u.id}">${esc(t('admin.promote'))}</button>`}
@@ -1518,54 +1667,138 @@ function openMessageComposer(listing, ctx) {
 }
 
 // Модалка просування оголошення (монетизація).
-async function openPromote(listing, ctx) {
-  if (!session.isAuthed) { ctx.toast(t('auth.needLogin')); location.hash = '#/login'; return; }
-  let plans = {};
-  try { ({ plans } = await api.plans()); } catch { ctx.toast('⚠️'); return; }
+// Створення тарифу (адмін).
+function openPlanEditor(ctx, onDone) {
+  const KINDS = ['bump', 'featured', 'subscription'];
+  const { back, close } = modal(`
+    <h2 style="margin:0 0 14px">${esc(t('admin.planNew'))}</h2>
+    <div class="form-grid">
+      <label class="lbl">${esc(t('admin.planKey'))}<input class="input" id="npKey" placeholder="featured14"></label>
+      <label class="lbl">${esc(t('admin.planLabel'))}<input class="input" id="npLabel"></label>
+      <div class="form-grid two">
+        <label class="lbl">${esc(t('admin.planAmount'))}<input class="input" id="npAmount" type="number" value="499"></label>
+        <label class="lbl">${esc(t('admin.planDays'))}<input class="input" id="npDays" type="number" value="14"></label>
+      </div>
+      <label class="lbl">${esc(t('admin.planKind'))}<select class="select" id="npKind">${KINDS.map((k) => `<option value="${k}">${esc(t('kind.' + k))}</option>`).join('')}</select></label>
+    </div>
+    <div class="row-gap mt16"><button class="btn btn-ghost" id="npCancel">${esc(t('common.cancel'))}</button>
+      <button class="btn btn-primary" id="npSave">${esc(t('admin.create'))}</button></div>`);
+  back.querySelector('#npCancel').addEventListener('click', close);
+  back.querySelector('#npSave').addEventListener('click', async () => {
+    try {
+      await api.adminCreatePlan({
+        key: back.querySelector('#npKey').value, label: back.querySelector('#npLabel').value,
+        amount: Number(back.querySelector('#npAmount').value), days: Number(back.querySelector('#npDays').value),
+        kind: back.querySelector('#npKind').value,
+      });
+      ctx.toast(t('admin.saved')); close(); if (onDone) onDone();
+    } catch (e) { ctx.toast(e.message); }
+  });
+}
 
-  const items = Object.entries(plans).map(([key, p]) => `
+// Створення промокоду (адмін).
+function openPromoEditor(ctx, onDone) {
+  const { back, close } = modal(`
+    <h2 style="margin:0 0 14px">${esc(t('admin.promoNew'))}</h2>
+    <div class="form-grid">
+      <label class="lbl">${esc(t('admin.promoCode'))}<input class="input" id="ncCode" placeholder="WELCOME20"></label>
+      <div class="form-grid two">
+        <label class="lbl">${esc(t('admin.promoKind'))}<select class="select" id="ncKind"><option value="percent">${esc(t('kind.percent'))}</option><option value="fixed">${esc(t('kind.fixed'))}</option></select></label>
+        <label class="lbl">${esc(t('admin.promoValue'))}<input class="input" id="ncValue" type="number" value="20"></label>
+      </div>
+      <div class="form-grid two">
+        <label class="lbl">${esc(t('admin.promoMaxUses'))}<input class="input" id="ncMax" type="number" value="0"></label>
+        <label class="lbl">${esc(t('admin.promoExpires'))}<input class="input" id="ncExp" type="date"></label>
+      </div>
+    </div>
+    <div class="row-gap mt16"><button class="btn btn-ghost" id="ncCancel">${esc(t('common.cancel'))}</button>
+      <button class="btn btn-primary" id="ncSave">${esc(t('admin.create'))}</button></div>`);
+  back.querySelector('#ncCancel').addEventListener('click', close);
+  back.querySelector('#ncSave').addEventListener('click', async () => {
+    try {
+      await api.adminCreatePromo({
+        code: back.querySelector('#ncCode').value, kind: back.querySelector('#ncKind').value,
+        value: Number(back.querySelector('#ncValue').value), maxUses: Number(back.querySelector('#ncMax').value),
+        expiresAt: back.querySelector('#ncExp').value || null,
+      });
+      ctx.toast(t('admin.saved')); close(); if (onDone) onDone();
+    } catch (e) { ctx.toast(e.message); }
+  });
+}
+
+// Просування оголошення (тарифи featured/bump).
+function openPromote(listing, ctx) {
+  openCheckout(ctx, { listingId: listing.id, kinds: ['featured', 'bump'], title: t('feat.title'), sub: t('feat.choose') });
+}
+// Оформлення PRO-підписки.
+function openSubscribe(ctx) {
+  openCheckout(ctx, { listingId: null, kinds: ['subscription'], title: t('sub.title'), sub: t('sub.desc') });
+}
+
+// Універсальне вікно оплати: вибір тарифу + промокод + Stripe/демо.
+async function openCheckout(ctx, { listingId, kinds, title, sub }) {
+  if (!session.isAuthed) { ctx.toast(t('auth.needLogin')); location.hash = '#/login'; return; }
+  let plansList = [];
+  try { ({ plansList } = await api.plans()); } catch { ctx.toast('⚠️'); return; }
+  const avail = plansList.filter((p) => kinds.includes(p.kind));
+  if (!avail.length) { ctx.toast('—'); return; }
+
+  const items = avail.map((p) => `
     <label class="plan-option">
-      <input type="radio" name="plan" value="${esc(key)}">
-      <span class="plan-body">
-        <b>${esc(p.label)}</b>
-        <span class="plan-price">${esc(formatPence(p.amount))}</span>
-      </span>
+      <input type="radio" name="plan" value="${esc(p.key)}">
+      <span class="plan-body"><b>${esc(p.label)}</b><span class="plan-price">${esc(formatPence(p.amount))}</span></span>
     </label>`).join('');
 
   const { back, close } = modal(`
-    <h2 style="margin:0 0 6px">${esc(t('feat.title'))}</h2>
-    <p class="muted" style="margin:0 0 14px">${esc(t('feat.choose'))}</p>
+    <h2 style="margin:0 0 6px">${esc(title)}</h2>
+    <p class="muted" style="margin:0 0 14px">${esc(sub)}</p>
     <div class="plan-list">${items}</div>
+    <div class="field mt16"><label class="lbl">${esc(t('promo.code'))}</label>
+      <div class="inline">
+        <input class="input" id="pmPromo" placeholder="${esc(t('promo.placeholder'))}" style="flex:1">
+        <button class="btn" id="pmApply" type="button">${esc(t('promo.apply'))}</button>
+      </div>
+      <div id="pmPromoMsg" class="hint mt8"></div>
+    </div>
     <p class="hint mt16">${esc(t('feat.payNote'))}</p>
     <div class="row-gap mt16">
       <button class="btn btn-ghost" id="pmCancel">${esc(t('common.cancel'))}</button>
       <button class="btn btn-primary" id="pmBuy" disabled>${esc(t('feat.buy'))}</button>
     </div>`);
 
+  let promoCode = '';
   back.querySelectorAll('input[name="plan"]').forEach((r) =>
     r.addEventListener('change', () => { back.querySelector('#pmBuy').disabled = false; }));
+
+  back.querySelector('#pmApply').addEventListener('click', async () => {
+    const code = back.querySelector('#pmPromo').value.trim();
+    const msg = back.querySelector('#pmPromoMsg');
+    if (!code) { promoCode = ''; msg.textContent = ''; return; }
+    try {
+      const r = await api.checkPromo(code);
+      if (r.valid) {
+        promoCode = code;
+        const v = r.kind === 'percent' ? r.value + '%' : formatPence(r.value);
+        msg.innerHTML = `<span style="color:var(--success)">${esc(t('promo.applied', { v }))}</span>`;
+      } else { promoCode = ''; msg.innerHTML = `<span style="color:var(--danger)">${esc(r.error || t('promo.invalid'))}</span>`; }
+    } catch { promoCode = ''; msg.innerHTML = `<span style="color:var(--danger)">${esc(t('promo.invalid'))}</span>`; }
+  });
+
   back.querySelector('#pmCancel').addEventListener('click', close);
   back.querySelector('#pmBuy').addEventListener('click', async () => {
     const chosen = back.querySelector('input[name="plan"]:checked');
     if (!chosen) return;
     const btn = back.querySelector('#pmBuy'); btn.disabled = true;
     try {
-      const res = await api.createOrder(listing.id, chosen.value);
-      if (res.paymentUrl) {
-        // Stripe увімкнено — переходимо на захищену сторінку оплати Stripe.
-        ctx.toast(t('feat.redirect'));
-        location.href = res.paymentUrl;
-        return;
-      }
-      // Демо/self-host без Stripe: підтверджуємо одразу.
-      await api.confirmOrder(res.order.id);
+      const res = await api.createOrder(chosen.value, listingId, promoCode);
+      if (res.paymentUrl) { ctx.toast(t('feat.redirect')); location.href = res.paymentUrl; return; }
+      if (!res.free) await api.confirmOrder(res.order.id); // демо-режим
+      // Оновлюємо сесію (підписка могла активуватись) і перерендерюємо.
+      try { const { user } = await api.me(); if (user) session.set(session.token, user); } catch { /* ignore */ }
       ctx.toast(t('feat.paySucceeded'));
       close();
       render();
-    } catch (e) {
-      ctx.toast(e.message);
-      btn.disabled = false;
-    }
+    } catch (e) { ctx.toast(e.message); btn.disabled = false; }
   });
 }
 

@@ -39,6 +39,8 @@ before(async () => {
       ADMIN_EMAILS: 'admin@test.dev', EXPOSE_RESET_TOKEN: '1',
       // Вимикаємо rate-limit, щоб численні тестові логіни не впиралися в ліміт.
       DISABLE_RATE_LIMIT: '1',
+      // Високий ліміт оголошень — тести створюють багато під одним акаунтом.
+      FREE_LISTING_QUOTA: '500',
     },
     stdio: 'ignore',
   });
@@ -549,6 +551,119 @@ test('без Stripe createOrder не повертає paymentUrl (демо-ре�
 test('health повідомляє про статус Stripe', async () => {
   const { json } = await req('GET', '/api/health');
   assert.equal(json.stripe, false, 'Stripe вимкнено в тестовому середовищі');
+});
+
+/* ============================ Тарифи (CRUD) ============================ */
+
+test('за замовчуванням засіяно тарифи, включно з підписками', async () => {
+  const { json } = await req('GET', '/api/plans');
+  assert.ok(json.plans.featured7, 'є featured7');
+  assert.ok(json.plans.pro_year, 'є річна підписка');
+  assert.ok(Array.isArray(json.plansList));
+});
+
+test('адмін редагує ціну тарифу', async () => {
+  const { status, json } = await req('PUT', '/api/admin/plans/featured7', { token: adminToken, body: { amount: 599, label: 'Виділене 7 днів+' } });
+  assert.equal(status, 200);
+  assert.equal(json.plan.amount, 599);
+  const pub = await req('GET', '/api/plans');
+  assert.equal(pub.json.plans.featured7.amount, 599, 'нова ціна видима публічно');
+});
+
+test('адмін створює і видаляє тариф', async () => {
+  const created = await req('POST', '/api/admin/plans', { token: adminToken, body: { key: 'featured90', label: '90 днів', amount: 3999, days: 90, kind: 'featured' } });
+  assert.equal(created.status, 201);
+  const dup = await req('POST', '/api/admin/plans', { token: adminToken, body: { key: 'featured90', label: 'Дубль', amount: 1, days: 1, kind: 'featured' } });
+  assert.equal(dup.status, 409, 'дублікат ключа відхилено');
+  const del = await req('DELETE', '/api/admin/plans/featured90', { token: adminToken });
+  assert.equal(del.status, 200);
+});
+
+test('неактивний тариф недоступний публічно і для купівлі', async () => {
+  await req('PUT', '/api/admin/plans/bump', { token: adminToken, body: { active: false } });
+  const pub = await req('GET', '/api/plans');
+  assert.ok(!pub.json.plans.bump, 'неактивний тариф прихований');
+  // Спроба купити неактивний — 400.
+  const created = await req('POST', '/api/listings', { token: tokenA, body: { title: 'Тариф тест айтем', description: 'опис опис опис', category: 'goods', location: 'Hull', phone: '+447111007700' } });
+  const buy = await req('POST', '/api/orders', { token: tokenA, body: { listingId: created.json.listing.id, plan: 'bump' } });
+  assert.equal(buy.status, 400);
+  await req('PUT', '/api/admin/plans/bump', { token: adminToken, body: { active: true } }); // повертаємо
+});
+
+test('не-адмін не має доступу до CRUD тарифів (403)', async () => {
+  const { status } = await req('POST', '/api/admin/plans', { token: tokenA, body: { key: 'x', label: 'x', amount: 1, days: 1, kind: 'bump' } });
+  assert.equal(status, 403);
+});
+
+/* ============================ Промокоди ============================ */
+
+test('адмін створює промокод, перевірка валідна', async () => {
+  const created = await req('POST', '/api/admin/promos', { token: adminToken, body: { code: 'welcome20', kind: 'percent', value: 20, maxUses: 100 } });
+  assert.equal(created.status, 201);
+  assert.equal(created.json.promo.code, 'WELCOME20', 'код у верхньому регістрі');
+  const check = await req('GET', '/api/promos/check?code=WELCOME20');
+  assert.equal(check.json.valid, true);
+  assert.equal(check.json.value, 20);
+});
+
+test('невалідний промокод відхиляється перевіркою', async () => {
+  const check = await req('GET', '/api/promos/check?code=NOPE999');
+  assert.equal(check.json.valid, false);
+});
+
+test('промокод знижує ціну замовлення', async () => {
+  const listing = await req('POST', '/api/listings', { token: tokenA, body: { title: 'Промо тест айтем', description: 'опис опис опис', category: 'goods', location: 'Hull', phone: '+447111008800', price: 10 } });
+  const order = await req('POST', '/api/orders', { token: tokenA, body: { listingId: listing.json.listing.id, plan: 'featured7', promoCode: 'WELCOME20' } });
+  assert.equal(order.status, 201);
+  assert.equal(order.json.order.baseAmount, 599);
+  assert.equal(order.json.order.amount, 479, '599 − 20% = 479');
+  assert.equal(order.json.order.promo, 'WELCOME20');
+});
+
+test('промокод на 100% активує безкоштовно й одразу', async () => {
+  await req('POST', '/api/admin/promos', { token: adminToken, body: { code: 'free100', kind: 'percent', value: 100 } });
+  const listing = await req('POST', '/api/listings', { token: tokenA, body: { title: 'Безкоштовне просування', description: 'опис опис опис', category: 'goods', location: 'Hull', phone: '+447111009900', price: 10 } });
+  const order = await req('POST', '/api/orders', { token: tokenA, body: { listingId: listing.json.listing.id, plan: 'featured30', promoCode: 'FREE100' } });
+  assert.equal(order.json.free, true);
+  assert.equal(order.json.order.status, 'paid');
+  const check = await req('GET', '/api/listings/' + listing.json.listing.id, { token: tokenA });
+  assert.equal(check.json.listing.featured, true);
+});
+
+/* ============================ Підписки PRO ============================ */
+
+test('покупка підписки робить користувача PRO', async () => {
+  const reg = await req('POST', '/api/auth/register', { body: { name: 'PRO Юзер', email: 'pro@test.dev', password: 'secret123' } });
+  const token = reg.json.token;
+  const order = await req('POST', '/api/orders', { token, body: { plan: 'pro_year' } });
+  assert.equal(order.status, 201);
+  assert.equal(order.json.order.kind, 'subscription');
+  assert.equal(order.json.order.listingId, null, 'підписка без оголошення');
+  await req('POST', `/api/orders/${order.json.order.id}/confirm`, { token: adminToken });
+  const me = await req('GET', '/api/auth/me', { token });
+  assert.equal(me.json.user.pro, true, 'користувач став PRO');
+  assert.ok(me.json.user.proUntil);
+});
+
+test('адмін видає та знімає PRO', async () => {
+  const reg = await req('POST', '/api/auth/register', { body: { name: 'Грант PRO', email: 'grant@test.dev', password: 'secret123' } });
+  const grant = await req('POST', `/api/admin/users/${reg.json.user.id}`, { token: adminToken, body: { action: 'grantPro', days: 30 } });
+  assert.equal(grant.json.user.pro, true);
+  const revoke = await req('POST', `/api/admin/users/${reg.json.user.id}`, { token: adminToken, body: { action: 'revokePro' } });
+  assert.equal(revoke.json.user.pro, false);
+});
+
+/* ============================ Гейт контактів ============================ */
+
+test('анонім не бачить контактів, авторизований бачить', async () => {
+  const list = await req('GET', '/api/listings?perPage=1');
+  const id = list.json.items[0].id;
+  const anon = await req('GET', '/api/listings/' + id);
+  assert.equal(anon.json.listing.phone, '', 'анонім — телефон прихований');
+  assert.equal(anon.json.listing.contactsLocked, true);
+  const authed = await req('GET', '/api/listings/' + id, { token: tokenA });
+  assert.ok(authed.json.listing.phone.length > 0, 'авторизований бачить телефон');
+  assert.notEqual(authed.json.listing.contactsLocked, true);
 });
 
 /* ============================ Управління користувачами ============================ */

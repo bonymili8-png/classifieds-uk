@@ -536,3 +536,23 @@ label.lbl .req { color: var(--danger); }
 .order-title { font-weight: 700; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .order-meta { font-size: .82rem; margin-top: 2px; }
 .order-side { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+
+/* -------- Реєстрація-гейт контактів -------- */
+.contact-gate { text-align: center; padding: 18px 8px; }
+.contact-gate .gate-icon { font-size: 2.2rem; }
+.contact-gate .gate-title { font-weight: 700; margin: 6px 0 2px; }
+
+/* -------- PRO бейдж -------- */
+.pro-badge { display: inline-block; background: linear-gradient(135deg, #7c3aed, #a855f7); color: #fff;
+  font-size: .62rem; font-weight: 800; padding: 2px 8px; border-radius: var(--r-pill); vertical-align: middle; letter-spacing: .04em; }
+
+/* -------- Адмін: редагування рядків тарифів/промокодів -------- */
+.admin-form-row { flex-wrap: wrap; align-items: stretch; }
+.ed-grid { flex: 1; display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; min-width: 0; }
+@media (min-width: 720px) { .ed-grid { grid-template-columns: repeat(3, 1fr); } }
+.ed-grid label { display: flex; flex-direction: column; gap: 3px; font-size: .72rem; color: var(--muted); font-weight: 600; }
+.ed-grid label.ck { flex-direction: row; align-items: center; gap: 6px; }
+.ed-grid .input, .ed-grid .select { padding: 7px 9px; font-size: .9rem; }
+.ed-uses { align-self: center; font-size: .78rem; }
+.admin-form-row .al-actions { align-items: flex-start; padding-top: 16px; }
+@media (max-width: 480px) { .hide-xs { display: none; } }

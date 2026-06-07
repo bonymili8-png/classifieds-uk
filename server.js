@@ -108,16 +108,27 @@ let DB = {
   events: [],     // { id, type, listingId?, userId?, ts } — аналітика подій
   orders: [],     // { id, userId, listingId, plan, amount, currency, status, createdAt, paidAt? } — монетизація
   audit: [],      // { id, adminId, action, target, ts } — журнал дій адміна
+  plans: [],      // тарифи (редаговані через адмінку)
+  promos: [],     // промокоди { code, kind:'percent'|'fixed', value, active, maxUses, uses, expiresAt? }
 };
 
-// Тарифи преміум-розміщення. amount у пенсах (GBP). days — тривалість ефекту.
-const PLANS = {
-  featured7: { label: 'Виділене 7 днів', amount: 499, days: 7, featured: true },
-  featured30: { label: 'Виділене 30 днів', amount: 1499, days: 30, featured: true },
-  bump: { label: 'Підняти нагору', amount: 199, days: 0, featured: false, bump: true },
-};
+// Тарифи за замовчуванням (засіваються в БД при першому старті). amount у пенсах (GBP).
+// kind: 'featured' (виділити на N днів) | 'bump' (підняти) | 'subscription' (підписка).
+const DEFAULT_PLANS = [
+  { key: 'bump',        label: 'Підняти нагору',      amount: 199,  days: 0,   kind: 'bump',         active: true },
+  { key: 'featured7',   label: 'Виділене 7 днів',     amount: 499,  days: 7,   kind: 'featured',     active: true },
+  { key: 'featured30',  label: 'Виділене 30 днів',    amount: 1499, days: 30,  kind: 'featured',     active: true },
+  { key: 'pro_month',   label: 'PRO підписка (місяць)', amount: 999,  days: 30,  kind: 'subscription', active: true },
+  { key: 'pro_year',    label: 'PRO підписка (рік)',   amount: 9900, days: 365, kind: 'subscription', active: true },
+];
 // Скільки безкоштовних активних оголошень дозволено одному акаунту.
 const FREE_LISTING_QUOTA = Number(process.env.FREE_LISTING_QUOTA) || 10;
+// Квота для PRO-передплатників.
+const PRO_LISTING_QUOTA = Number(process.env.PRO_LISTING_QUOTA) || 100;
+
+// Пошук тарифу за ключем.
+function getPlan(key) { return DB.plans.find((p) => p.key === key); }
+
 
 async function ensureDirs() {
   await fs.mkdir(DATA_DIR, { recursive: true });
@@ -150,6 +161,10 @@ async function loadDB() {
   DB.events ||= [];
   DB.orders ||= [];
   DB.audit ||= [];
+  DB.plans ||= [];
+  DB.promos ||= [];
+  // Засіваємо тарифи за замовчуванням, якщо їх ще немає.
+  if (!DB.plans.length) DB.plans = DEFAULT_PLANS.map((p) => ({ ...p }));
   // Дефолтні поля для старих оголошень.
   for (const l of DB.listings) {
     l.status ||= 'active';
@@ -163,10 +178,18 @@ async function loadDB() {
       l.expiresAt = new Date(new Date(l.bumpedAt || l.createdAt).getTime() + LISTING_TTL).toISOString();
     }
   }
-  for (const u of DB.users) { if (!('banned' in u)) u.banned = false; }
+  for (const u of DB.users) {
+    if (!('banned' in u)) u.banned = false;
+    if (!('proUntil' in u)) u.proUntil = null; // дата завершення PRO-підписки
+  }
   pruneSessions();
   expireListings();
   expireFeatured();
+}
+
+// Чи активна PRO-підписка у користувача.
+function isPro(user) {
+  return !!(user && user.proUntil && new Date(user.proUntil).getTime() > Date.now());
 }
 
 // Знімає преміум-виділення, термін якого вийшов.
@@ -417,7 +440,7 @@ function publicUser(u) {
 }
 function selfUser(u) {
   if (!u) return null;
-  return { ...publicUser(u), email: u.email, phone: u.phone || '', isAdmin: isAdmin(u), banned: !!u.banned };
+  return { ...publicUser(u), email: u.email, phone: u.phone || '', isAdmin: isAdmin(u), banned: !!u.banned, pro: isPro(u), proUntil: u.proUntil || null };
 }
 
 async function registerUser(body) {
@@ -547,10 +570,25 @@ function sanitizeAttributes(category, raw) {
   return out;
 }
 
-function publicListing(l) {
+// viewer: поточний користувач (або null для анонімного). Якщо передано (навіть null),
+// вмикається гейт контактів — анонімам телефон/WhatsApp/Telegram приховуються,
+// а у відповідь додається contactsLocked:true (підказка зареєструватися).
+function publicListing(l, viewer) {
   const { editTokenHash, ...rest } = l;
   const owner = l.userId ? DB.users.find((u) => u.id === l.userId) : null;
-  return { ...rest, owner: owner ? publicUser(owner) : null };
+  const out = { ...rest, owner: owner ? publicUser(owner) : null };
+
+  if (viewer !== undefined) {
+    const isOwner = viewer && (viewer.id === l.userId || isAdmin(viewer));
+    const canSeeContacts = !!viewer || isOwner; // будь-який авторизований бачить контакти
+    if (!canSeeContacts) {
+      out.phone = '';
+      out.whatsapp = '';
+      out.telegram = '';
+      out.contactsLocked = true;
+    }
+  }
+  return out;
 }
 
 function validateListing(b) {
@@ -599,11 +637,12 @@ function canManage(listing, user, body, url) {
 async function createListing(body, user) {
   if (user && user.banned) return { status: 403, body: { error: 'Ваш акаунт заблоковано.' } };
 
-  // Квота безкоштовних активних оголошень на акаунт (захист від спаму, основа монетизації).
+  // Квота активних оголошень на акаунт. PRO-передплатники мають вищий ліміт.
   if (user && !isAdmin(user)) {
+    const quota = isPro(user) ? PRO_LISTING_QUOTA : FREE_LISTING_QUOTA;
     const activeOwn = DB.listings.filter((l) => l.userId === user.id && l.status === 'active').length;
-    if (activeOwn >= FREE_LISTING_QUOTA) {
-      return { status: 402, body: { error: `Досягнуто ліміту безкоштовних оголошень (${FREE_LISTING_QUOTA}). Архівуйте старі або скористайтеся преміум-розміщенням.` } };
+    if (activeOwn >= quota) {
+      return { status: 402, body: { error: `Досягнуто ліміту оголошень (${quota}). Архівуйте старі${isPro(user) ? '' : ', оформіть PRO-підписку'} або скористайтеся преміум-розміщенням.` } };
     }
   }
 
@@ -1066,65 +1105,119 @@ function analyticsSeries(days = 14) {
  * ------------------------------------------------------------------------- */
 
 function publicOrder(o) {
-  return { id: o.id, listingId: o.listingId, plan: o.plan, amount: o.amount, currency: o.currency, status: o.status, createdAt: o.createdAt, paidAt: o.paidAt || null };
+  return {
+    id: o.id, listingId: o.listingId, plan: o.plan,
+    amount: o.amount, baseAmount: o.baseAmount ?? o.amount, promo: o.promo || null,
+    currency: o.currency, status: o.status, kind: o.kind || null,
+    createdAt: o.createdAt, paidAt: o.paidAt || null,
+  };
 }
 
-// Створює замовлення на преміум для оголошення (повертає інструкції до оплати).
+// Перевіряє промокод. Повертає { promo } або { error }.
+function checkPromo(code) {
+  if (!code) return { promo: null };
+  const promo = DB.promos.find((p) => p.code.toLowerCase() === String(code).trim().toLowerCase());
+  if (!promo) return { error: 'Промокод не знайдено.' };
+  if (!promo.active) return { error: 'Промокод неактивний.' };
+  if (promo.expiresAt && new Date(promo.expiresAt).getTime() < Date.now()) return { error: 'Термін дії промокоду вийшов.' };
+  if (promo.maxUses && promo.uses >= promo.maxUses) return { error: 'Промокод вичерпано.' };
+  return { promo };
+}
+
+// Обчислює фінальну ціну з урахуванням промокоду (не нижче 0).
+function applyPromoToAmount(amount, promo) {
+  if (!promo) return amount;
+  let result = amount;
+  if (promo.kind === 'percent') result = Math.round(amount * (1 - promo.value / 100));
+  else if (promo.kind === 'fixed') result = amount - promo.value;
+  return Math.max(0, result);
+}
+
+// Створює замовлення (просування оголошення АБО підписку). Повертає інструкції до оплати.
 async function createOrder(body, user) {
-  if (!user) return { status: 401, body: { error: 'Увійдіть, щоб придбати розміщення.' } };
-  const plan = PLANS[body.plan];
-  if (!plan) return { status: 400, body: { error: 'Невідомий тариф.' } };
-  const l = DB.listings.find((x) => x.id === body.listingId);
-  if (!l) return { status: 404, body: { error: 'Оголошення не знайдено.' } };
-  if (l.userId !== user.id && !isAdmin(user)) return { status: 403, body: { error: 'Це не ваше оголошення.' } };
+  if (!user) return { status: 401, body: { error: 'Увійдіть, щоб придбати.' } };
+  if (user.banned) return { status: 403, body: { error: 'Ваш акаунт заблоковано.' } };
+  const plan = getPlan(body.plan);
+  if (!plan || !plan.active) return { status: 400, body: { error: 'Невідомий або неактивний тариф.' } };
+
+  const isSub = plan.kind === 'subscription';
+  let listing = null;
+  if (!isSub) {
+    listing = DB.listings.find((x) => x.id === body.listingId);
+    if (!listing) return { status: 404, body: { error: 'Оголошення не знайдено.' } };
+    if (listing.userId !== user.id && !isAdmin(user)) return { status: 403, body: { error: 'Це не ваше оголошення.' } };
+  }
+
+  // Промокод (необов'язковий).
+  const { promo, error } = checkPromo(body.promoCode);
+  if (error) return { status: 400, body: { error } };
+  const finalAmount = applyPromoToAmount(plan.amount, promo);
 
   const order = {
-    id: uid(14), userId: user.id, listingId: l.id, plan: body.plan,
-    amount: plan.amount, currency: 'GBP', status: 'pending', createdAt: new Date().toISOString(),
+    id: uid(14), userId: user.id, listingId: isSub ? null : listing.id, plan: plan.key,
+    kind: plan.kind, baseAmount: plan.amount, amount: finalAmount,
+    promo: promo ? promo.code : null, currency: 'GBP', status: 'pending',
+    createdAt: new Date().toISOString(),
   };
   DB.orders.push(order);
+  if (promo) { promo.uses = (promo.uses || 0) + 1; }
   await saveDB();
 
-  // Якщо налаштовано Stripe — створюємо Checkout Session і повертаємо посилання на оплату.
+  // Безкоштовно (100% знижка) — одразу активуємо без платіжки.
+  if (finalAmount === 0) {
+    await markOrderPaid(order);
+    return { status: 201, body: { order: publicOrder(order), plan, free: true } };
+  }
+
+  // Stripe — створюємо Checkout Session.
   if (stripeEnabled) {
     try {
-      const sessionData = await createCheckoutSession({ order, plan, customerEmail: user.email });
+      const sessionData = await createCheckoutSession({ order, plan: { ...plan, label: plan.label }, customerEmail: user.email });
       order.stripeSessionId = sessionData.id;
       await saveDB();
-      return { status: 201, body: { order: publicOrder(order), plan: { ...plan, key: body.plan }, paymentUrl: sessionData.url } };
+      return { status: 201, body: { order: publicOrder(order), plan, paymentUrl: sessionData.url } };
     } catch (e) {
       console.error('Stripe checkout error:', e.message);
       return { status: 502, body: { error: 'Не вдалося створити платіж. Спробуйте пізніше.' } };
     }
   }
 
-  // Інакше — "ручний/демо" режим: підтвердження через /api/orders/:id/confirm.
-  return { status: 201, body: { order: publicOrder(order), plan: { ...plan, key: body.plan } } };
+  // Демо/ручний режим.
+  return { status: 201, body: { order: publicOrder(order), plan } };
 }
 
-// Позначає замовлення оплаченим і застосовує тариф (спільна логіка для
-// ручного підтвердження та Stripe-вебхука). Безпечна до повторного виклику.
+// Позначає замовлення оплаченим і застосовує ефект (просування або підписку).
 async function markOrderPaid(order) {
   if (order.status === 'paid') return;
   order.status = 'paid';
   order.paidAt = new Date().toISOString();
-  const l = DB.listings.find((x) => x.id === order.listingId);
-  if (l) applyPlan(l, order.plan);
+  const plan = getPlan(order.plan);
+  if (plan && plan.kind === 'subscription') {
+    const u = DB.users.find((x) => x.id === order.userId);
+    if (u) {
+      const now = Date.now();
+      const base = u.proUntil && new Date(u.proUntil).getTime() > now ? new Date(u.proUntil).getTime() : now;
+      u.proUntil = new Date(base + (plan.days || 30) * 86400000).toISOString();
+    }
+  } else if (order.listingId) {
+    const l = DB.listings.find((x) => x.id === order.listingId);
+    if (l) applyPlan(l, order.plan);
+  }
   await saveDB();
 }
 
-// Застосовує ефект тарифу до оголошення.
+// Застосовує ефект тарифу просування до оголошення.
 function applyPlan(listing, planKey) {
-  const plan = PLANS[planKey];
+  const plan = getPlan(planKey);
   if (!plan) return;
   const now = Date.now();
-  if (plan.featured) {
+  if (plan.kind === 'featured') {
     listing.featured = true;
     const base = listing.featuredUntil && new Date(listing.featuredUntil).getTime() > now
       ? new Date(listing.featuredUntil).getTime() : now;
-    listing.featuredUntil = new Date(base + plan.days * 86400000).toISOString();
+    listing.featuredUntil = new Date(base + (plan.days || 0) * 86400000).toISOString();
   }
-  if (plan.bump || plan.featured) {
+  if (plan.kind === 'bump' || plan.kind === 'featured') {
     listing.bumpedAt = new Date().toISOString();
     listing.expiresAt = new Date(now + LISTING_TTL).toISOString();
     if (listing.status === 'expired') listing.status = 'active';
@@ -1207,6 +1300,7 @@ function adminUserView(u) {
   return {
     id: u.id, name: u.name, email: u.email, city: u.city || '',
     createdAt: u.createdAt, isAdmin: isAdmin(u), banned: !!u.banned,
+    pro: isPro(u), proUntil: u.proUntil || null,
     listings: DB.listings.filter((l) => l.userId === u.id).length,
   };
 }
@@ -1236,10 +1330,124 @@ async function adminUpdateUser(id, body, admin) {
     case 'unban': u.banned = false; audit(admin.id, 'unban_user', u.id); break;
     case 'promote': u.isAdmin = true; audit(admin.id, 'promote_user', u.id); break;
     case 'demote': u.isAdmin = false; audit(admin.id, 'demote_user', u.id); break;
+    case 'grantPro': {
+      const days = Math.max(1, Math.min(3650, Number(body.days) || 30));
+      const now = Date.now();
+      const base = u.proUntil && new Date(u.proUntil).getTime() > now ? new Date(u.proUntil).getTime() : now;
+      u.proUntil = new Date(base + days * 86400000).toISOString();
+      audit(admin.id, 'grant_pro', u.id);
+      break;
+    }
+    case 'revokePro': u.proUntil = null; audit(admin.id, 'revoke_pro', u.id); break;
     default: return { status: 400, body: { error: 'Невідома дія.' } };
   }
   await saveDB();
   return { status: 200, body: { user: adminUserView(u) } };
+}
+
+/* ----------------------------------------------------------------------------
+ * Адмін: CRUD тарифів та промокодів
+ * ------------------------------------------------------------------------- */
+
+const PLAN_KINDS = new Set(['bump', 'featured', 'subscription']);
+
+function validatePlan(b, existing) {
+  const key = clampStr(b.key, 40).replace(/[^a-zA-Z0-9_]/g, '');
+  const label = clampStr(b.label, 60);
+  const amount = Math.round(Number(b.amount));
+  const days = Math.max(0, Math.round(Number(b.days) || 0));
+  const kind = clampStr(b.kind, 20);
+  if (!key) return { error: 'Вкажіть ключ тарифу (латиниця/цифри).' };
+  if (label.length < 2) return { error: 'Вкажіть назву тарифу.' };
+  if (!Number.isFinite(amount) || amount < 0) return { error: 'Некоректна ціна.' };
+  if (!PLAN_KINDS.has(kind)) return { error: 'Тип: bump, featured або subscription.' };
+  return { value: { key, label, amount, days, kind, active: b.active !== false, ...(existing || {}), } };
+}
+
+async function adminCreatePlan(body, admin) {
+  const { value, error } = validatePlan(body);
+  if (error) return { status: 400, body: { error } };
+  if (getPlan(value.key)) return { status: 409, body: { error: 'Тариф із таким ключем уже існує.' } };
+  DB.plans.push({ key: value.key, label: value.label, amount: value.amount, days: value.days, kind: value.kind, active: value.active });
+  audit(admin.id, 'create_plan', value.key);
+  await saveDB();
+  return { status: 201, body: { plan: getPlan(value.key) } };
+}
+
+async function adminUpdatePlan(key, body, admin) {
+  const plan = getPlan(key);
+  if (!plan) return { status: 404, body: { error: 'Тариф не знайдено.' } };
+  if (body.label != null) plan.label = clampStr(body.label, 60) || plan.label;
+  if (body.amount != null) { const a = Math.round(Number(body.amount)); if (Number.isFinite(a) && a >= 0) plan.amount = a; }
+  if (body.days != null) { const d = Math.round(Number(body.days)); if (Number.isFinite(d) && d >= 0) plan.days = d; }
+  if (body.kind != null && PLAN_KINDS.has(body.kind)) plan.kind = body.kind;
+  if (body.active != null) plan.active = !!body.active;
+  audit(admin.id, 'update_plan', key);
+  await saveDB();
+  return { status: 200, body: { plan } };
+}
+
+async function adminDeletePlan(key, admin) {
+  const idx = DB.plans.findIndex((p) => p.key === key);
+  if (idx === -1) return { status: 404, body: { error: 'Тариф не знайдено.' } };
+  DB.plans.splice(idx, 1);
+  audit(admin.id, 'delete_plan', key);
+  await saveDB();
+  return { status: 200, body: { ok: true } };
+}
+
+function promoView(p) {
+  return { code: p.code, kind: p.kind, value: p.value, active: p.active, uses: p.uses || 0, maxUses: p.maxUses || 0, expiresAt: p.expiresAt || null, createdAt: p.createdAt };
+}
+
+function validatePromo(b) {
+  const code = clampStr(b.code, 30).replace(/\s+/g, '').toUpperCase();
+  const kind = b.kind === 'fixed' ? 'fixed' : 'percent';
+  const value = Math.round(Number(b.value));
+  if (code.length < 2) return { error: 'Вкажіть код промокоду.' };
+  if (!Number.isFinite(value) || value <= 0) return { error: 'Некоректне значення знижки.' };
+  if (kind === 'percent' && value > 100) return { error: 'Відсоток не може бути більшим за 100.' };
+  return {
+    value: {
+      code, kind, value,
+      active: b.active !== false,
+      maxUses: Math.max(0, Math.round(Number(b.maxUses) || 0)),
+      expiresAt: b.expiresAt ? new Date(b.expiresAt).toISOString() : null,
+    },
+  };
+}
+
+async function adminCreatePromo(body, admin) {
+  const { value, error } = validatePromo(body);
+  if (error) return { status: 400, body: { error } };
+  if (DB.promos.find((p) => p.code === value.code)) return { status: 409, body: { error: 'Такий промокод уже існує.' } };
+  const promo = { ...value, uses: 0, createdAt: new Date().toISOString() };
+  DB.promos.push(promo);
+  audit(admin.id, 'create_promo', promo.code);
+  await saveDB();
+  return { status: 201, body: { promo: promoView(promo) } };
+}
+
+async function adminUpdatePromo(code, body, admin) {
+  const promo = DB.promos.find((p) => p.code === String(code).toUpperCase());
+  if (!promo) return { status: 404, body: { error: 'Промокод не знайдено.' } };
+  if (body.value != null) { const v = Math.round(Number(body.value)); if (Number.isFinite(v) && v > 0) promo.value = v; }
+  if (body.kind != null) promo.kind = body.kind === 'fixed' ? 'fixed' : 'percent';
+  if (body.active != null) promo.active = !!body.active;
+  if (body.maxUses != null) promo.maxUses = Math.max(0, Math.round(Number(body.maxUses) || 0));
+  if (body.expiresAt !== undefined) promo.expiresAt = body.expiresAt ? new Date(body.expiresAt).toISOString() : null;
+  audit(admin.id, 'update_promo', promo.code);
+  await saveDB();
+  return { status: 200, body: { promo: promoView(promo) } };
+}
+
+async function adminDeletePromo(code, admin) {
+  const idx = DB.promos.findIndex((p) => p.code === String(code).toUpperCase());
+  if (idx === -1) return { status: 404, body: { error: 'Промокод не знайдено.' } };
+  DB.promos.splice(idx, 1);
+  audit(admin.id, 'delete_promo', String(code).toUpperCase());
+  await saveDB();
+  return { status: 200, body: { ok: true } };
 }
 
 function adminStats() {
@@ -1312,6 +1520,8 @@ function adminBackup() {
     reports: DB.reports,
     orders: DB.orders,
     audit: DB.audit,
+    plans: DB.plans,
+    promos: DB.promos,
   };
 }
 
@@ -1594,7 +1804,8 @@ async function handleApi(req, res, url) {
         if (!l) return send(res, 404, { error: 'Оголошення не знайдено.' });
         // Перегляд рахуємо як подію (агрегат + часовий ряд).
         trackEvent('view', { listingId: id, userId: user ? user.id : null });
-        return send(res, 200, { listing: publicListing(l) });
+        // Гейт контактів: анонімам приховуємо телефон/WhatsApp/Telegram.
+        return send(res, 200, { listing: publicListing(l, user) });
       }
       if (req.method === 'POST' && !id) {
         // Анти-спам: не більше 20 нових оголошень за годину з адреси.
@@ -1659,7 +1870,20 @@ async function handleApi(req, res, url) {
 
     /* ---- Монетизація: тарифи та замовлення ---- */
     if (resource === 'plans' && req.method === 'GET') {
-      return send(res, 200, { plans: PLANS, freeQuota: FREE_LISTING_QUOTA, stripe: stripeEnabled }, { 'Cache-Control': 'public, max-age=600' });
+      // Назовні — лише активні тарифи (як мапа для зворотної сумісності + масив).
+      const activeArr = DB.plans.filter((p) => p.active);
+      const activeMap = Object.fromEntries(activeArr.map((p) => [p.key, p]));
+      return send(res, 200, {
+        plans: activeMap, plansList: activeArr,
+        freeQuota: FREE_LISTING_QUOTA, proQuota: PRO_LISTING_QUOTA, stripe: stripeEnabled,
+      }, { 'Cache-Control': 'no-store' });
+    }
+    // Перевірка промокоду перед оплатою: /api/promos/check?code=...
+    if (resource === 'promos' && parts[2] === 'check' && req.method === 'GET') {
+      const { promo, error } = checkPromo(url.searchParams.get('code'));
+      if (error) return send(res, 200, { valid: false, error });
+      if (!promo) return send(res, 200, { valid: false });
+      return send(res, 200, { valid: true, kind: promo.kind, value: promo.value, code: promo.code });
     }
     if (resource === 'orders') {
       const oid = parts[2];
@@ -1710,6 +1934,20 @@ async function handleApi(req, res, url) {
       // Замовлення (усі) + ручне підтвердження
       if (req.method === 'GET' && sub === 'orders') {
         return send(res, 200, { orders: DB.orders.slice().sort((a, b) => (b.createdAt > a.createdAt ? 1 : -1)).map(publicOrder) });
+      }
+      // CRUD тарифів
+      if (sub === 'plans') {
+        if (req.method === 'GET') return send(res, 200, { plans: DB.plans });
+        if (req.method === 'POST' && !parts[3]) { const r = await adminCreatePlan(await readBody(req), user); return send(res, r.status, r.body); }
+        if ((req.method === 'PUT' || req.method === 'PATCH') && parts[3]) { const r = await adminUpdatePlan(parts[3], await readBody(req), user); return send(res, r.status, r.body); }
+        if (req.method === 'DELETE' && parts[3]) { const r = await adminDeletePlan(parts[3], user); return send(res, r.status, r.body); }
+      }
+      // CRUD промокодів
+      if (sub === 'promos') {
+        if (req.method === 'GET') return send(res, 200, { promos: DB.promos.map(promoView) });
+        if (req.method === 'POST' && !parts[3]) { const r = await adminCreatePromo(await readBody(req), user); return send(res, r.status, r.body); }
+        if ((req.method === 'PUT' || req.method === 'PATCH') && parts[3]) { const r = await adminUpdatePromo(parts[3], await readBody(req), user); return send(res, r.status, r.body); }
+        if (req.method === 'DELETE' && parts[3]) { const r = await adminDeletePromo(parts[3], user); return send(res, r.status, r.body); }
       }
       // Журнал дій
       if (req.method === 'GET' && sub === 'audit') {
